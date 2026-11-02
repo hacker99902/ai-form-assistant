@@ -1,17 +1,16 @@
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.api.database import router as database_router
 
 app = FastAPI(
     title="AI Form Assistant API",
     description="AI-powered document extraction and form autofill",
-    version="0.1.0",
+    version="0.2.0"
 )
 
-# Frontend development server
 origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
+    "http://localhost:5500",
+    "http://127.0.0.1:5500",
 ]
 
 app.add_middleware(
@@ -22,19 +21,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(
+    database_router,
+    prefix="/api/v1/database",
+    tags=["Database"]
+)
+
 
 @app.get("/")
 async def root():
     return {
-        "message": "Welcome to AI Form Assistant API",
-        "status": "running",
-        "version": "0.1.0",
+        "message": "AI Form Assistant API",
+        "status": "running"
     }
 
 
 @app.get("/api/v1/health")
 async def health_check():
-    return {
-        "status": "healthy",
-        "service": "AI Form Assistant Backend",
-    }
+    return {"status": "healthy"}
