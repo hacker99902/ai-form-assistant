@@ -1,12 +1,34 @@
+
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.api.database import router as database_router
+from app.api.documents import router as documents_router
+from app.core.database import pool
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Opening Neon PostgreSQL connection pool...")
+    pool.open(wait=True)
+
+    try:
+        print("Neon connection pool ready!")
+        yield
+    finally:
+        pool.close()
+        print("Neon connection pool closed.")
+
 
 app = FastAPI(
     title="AI Form Assistant API",
     description="AI-powered document extraction and form autofill",
-    version="0.2.0"
+    version="0.2.0",
+    lifespan=lifespan,
 )
+
 
 origins = [
     "http://localhost:5500",
@@ -21,10 +43,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 app.include_router(
     database_router,
     prefix="/api/v1/database",
-    tags=["Database"]
+    tags=["Database"],
+)
+
+app.include_router(
+    documents_router,
+    prefix="/api/v1/documents",
+    tags=["Documents"],
 )
 
 
@@ -32,7 +61,7 @@ app.include_router(
 async def root():
     return {
         "message": "AI Form Assistant API",
-        "status": "running"
+        "status": "running",
     }
 
 

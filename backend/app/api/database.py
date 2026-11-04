@@ -1,30 +1,37 @@
+import logging
 
 from fastapi import APIRouter, HTTPException
-from app.core.supabase import get_supabase
+from app.core.database import get_db_pool
 
 router = APIRouter()
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 @router.get("/test")
-async def test_database():
+def test_database():
     try:
-        db = get_supabase()
+        pool = get_db_pool()
 
-        response = (
-            db.table("processing_sessions")
-            .select("id")
-            .limit(1)
-            .execute()
-        )
+        with pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT current_database(), version()
+                """)
+
+                result = cursor.fetchone()
 
         return {
             "status": "connected",
-            "database": "Supabase PostgreSQL",
-            "message": "Database connection successful"
+            "database": result[0],
+            "message": "Neon PostgreSQL connection successful"
         }
 
-    except Exception:
+    except Exception as exc:
+        logger.exception("Neon database connection failed")
+
         raise HTTPException(
             status_code=500,
-            detail="Supabase database connection failed"
-        )
+            detail=f"Neon connection failed: {type(exc).__name__}"
+        ) from exc
