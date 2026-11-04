@@ -4,37 +4,64 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
     <title>AI Form Assistant</title>
+
     <link rel="stylesheet" href="css/style.css">
 </head>
 
 <body>
 
     <main class="container">
-        <h1>AI Form Assistant</h1>
-        <p>Upload your combined PDF documents.</p>
 
-        <div class="upload-box">
+        <header>
+            <h1>AI Form Assistant</h1>
+            <p>Upload your documents. We'll extract the information for you.</p>
+        </header>
+
+        <section class="upload-section">
             <input
                 type="file"
                 id="pdfInput"
-                accept="application/pdf,.pdf"
+                accept=".pdf,application/pdf"
             >
 
             <button id="uploadButton">
-                Upload and Process PDF
+                Upload and Process
             </button>
-        </div>
-
-        <p id="status"></p>
-
-        <section id="results" hidden>
-            <h2>PDF Processing Results</h2>
-            <pre id="resultData"></pre>
         </section>
+
+        <p id="status" role="status"></p>
+
+        <section id="reviewSection" hidden>
+
+            <div class="section-heading">
+                <h2>Extracted Information</h2>
+                <span id="reviewStatus">Needs review</span>
+            </div>
+
+            <p class="hint">
+                Check the extracted information and correct anything that is wrong.
+            </p>
+
+            <div id="fieldsContainer"></div>
+
+            <div class="actions">
+                <button id="saveChangesButton" class="secondary">
+                    Save Corrections
+                </button>
+
+                <button id="saveProfileButton">
+                    Save Verified Profile
+                </button>
+            </div>
+
+        </section>
+
     </main>
 
-    <script src="js/main.js"></script>
     <script src="js/api.js"></script>
+    <script src="js/main.js"></script>
+
 </body>
 </html>
