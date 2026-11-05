@@ -1,4 +1,6 @@
+
 from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -16,9 +18,55 @@ DocumentType = Literal[
 ]
 
 
+DocumentSubtype = Literal[
+    # Identity documents
+    "aadhaar",
+    "pan_card",
+    "passport",
+    "voter_id",
+    "driving_license",
+    "other_identity",
+
+    # School and academic marksheets
+    "class_10",
+    "class_12",
+    "diploma",
+
+    # Higher education
+    "undergraduate",
+    "engineering_semester",
+    "engineering_consolidated",
+    "postgraduate",
+    "academic_transcript",
+    "other_academic",
+
+        # Certificates
+    "academic_certificate",
+    "professional_certificate",
+    "course_certificate",
+    "internship_certificate",
+    "experience_certificate",
+    "other_certificate",
+
+    # Offer letters
+    "employment_offer",
+    "internship_offer",
+
+    # Admission letters
+    "college_admission_letter",
+    "university_admission_letter",
+
+    # Other
+    "other"
+]
+
+
 class ClassifiedDocument(BaseModel):
 
     document_type: DocumentType
+
+    # Optional to maintain compatibility with existing documents.
+    document_subtype: DocumentSubtype | None = None
 
     start_page: int = Field(ge=1)
 
@@ -27,7 +75,6 @@ class ClassifiedDocument(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
     evidence: str
-
 
     @model_validator(mode="after")
     def validate_page_range(self):
@@ -43,13 +90,17 @@ class ClassificationResult(BaseModel):
 
     @model_validator(mode="after")
     def validate_document_ranges(self):
+
         documents = sorted(
             self.documents,
             key=lambda document: document.start_page
         )
 
         for previous, current in zip(documents, documents[1:]):
+
             if current.start_page <= previous.end_page:
-                raise ValueError("Document page ranges cannot overlap")
+                raise ValueError(
+                    "Document page ranges cannot overlap"
+                )
 
         return self

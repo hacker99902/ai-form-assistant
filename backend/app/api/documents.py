@@ -571,6 +571,7 @@ def classify_uploaded_document(document_id: UUID):
                         **metadata,
                         "classification": {
                             "document_type": group.document_type,
+                            "document_subtype": group.document_subtype,
                             "confidence": group.confidence,
                             "evidence": group.evidence,
                             "start_page": group.start_page,
@@ -585,6 +586,7 @@ def classify_uploaded_document(document_id: UUID):
                             else uuid.uuid4()
                         ),
                         "document_type": group.document_type,
+                        "document_subtype": group.document_subtype,
                         "start_page": group.start_page,
                         "end_page": group.end_page,
                         "extracted_text": group_text,
@@ -646,6 +648,7 @@ def classify_uploaded_document(document_id: UUID):
                 {
                     "extracted_document_id": str(item["id"]),
                     "document_type": item["document_type"],
+                    "document_subtype": item["document_subtype"],
                     "start_page": item["start_page"],
                     "end_page": item["end_page"],
                     "confidence": item["extraction_metadata"]["classification"]["confidence"],

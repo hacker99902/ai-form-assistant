@@ -2,7 +2,7 @@ import json
 import logging
 import re
 from typing import Any
-
+from app.services.pii_redaction import redact_pii
 from groq import Groq
 
 from app.core.config import settings
@@ -449,7 +449,16 @@ def _apply_fallbacks(
         "portfolio_url",
     )
     for field in personal_fields:
-        if not personal.get(field) and fallbacks.get(field):
+        current_value = personal.get(field)
+
+        is_missing = not current_value
+
+        is_redacted = (
+            isinstance(current_value, str)
+            and "REDACTED" in current_value.upper()
+        )
+
+        if (is_missing or is_redacted) and fallbacks.get(field):
             personal[field] = fallbacks[field]
 
     # Only use the single detected institution as a fallback for the first
@@ -495,21 +504,36 @@ def normalize_project_names(extracted_data: dict) -> dict:
 
     return extracted_data
 
-
 def extract_resume_details(extracted_text: str) -> ResumeDetails:
     """
-    Extract structured resume information using Groq, apply conservative
-    text-based fallbacks, normalize the response, and validate it with Pydantic.
+    Extract structured resume information using Groq.
+
+    Original text is retained locally for fallback extraction.
+    Redacted text is sent to Groq to minimize PII exposure.
     """
+
     if not extracted_text or not extracted_text.strip():
         raise ValueError("Resume text cannot be empty")
 
     try:
+
+        # 1. Redact sensitive information locally.
+        safe_text = redact_pii(extracted_text)
+
+        logger.info(
+            "PII redaction applied before resume extraction."
+        )
+
+        # 2. Send only redacted text to Groq.
         response = client.chat.completions.create(
             model=settings.GROQ_MODEL,
+
             response_format={"type": "json_object"},
+
             temperature=0.1,
+
             max_tokens=8000,
+
             messages=[
                 {
                     "role": "system",
@@ -519,6 +543,7 @@ def extract_resume_details(extracted_text: str) -> ResumeDetails:
                     "role": "user",
                     "content": (
                         "Extract the resume information from this text.\n\n"
+
                         "OUTPUT REQUIREMENTS:\n"
                         "- achievements, certifications, education, "
                         "experience, and projects must be lists of objects.\n"
@@ -528,44 +553,58 @@ def extract_resume_details(extracted_text: str) -> ResumeDetails:
                         "- field_confidence must be a dictionary of scores.\n"
                         "- Do not return null for list fields.\n"
                         "- Do not put field_confidence inside confidence.\n\n"
-                        f"RESUME TEXT:\n{extracted_text}"
+
+                        "Some personal information may be masked for privacy. "
+                        "Do not attempt to reconstruct masked information.\n\n"
+
+                        f"RESUME TEXT:\n{safe_text}"
                     ),
                 },
             ],
         )
 
         content = response.choices[0].message.content
+
         if not content:
             raise ValueError("Groq returned an empty response")
 
+        # 3. Parse Groq response.
         extracted_data = json.loads(content)
+
         if not isinstance(extracted_data, dict):
             raise ValueError("Groq response must be a JSON object")
 
-        # Apply deterministic fallbacks before normalizing and validating.
+        # 4. Run fallbacks on ORIGINAL text locally.
         fallbacks = extract_resume_fallbacks(extracted_text)
+
         _apply_fallbacks(extracted_data, fallbacks)
 
+        # 5. Normalize extracted data.
         _normalize_list_fields(extracted_data)
+
         _normalize_achievements(extracted_data)
+
         _normalize_confidence(extracted_data)
 
-        # Enforce the expected document type.
         extracted_data["document_type"] = "resume"
 
-        # Normalize CGPA and percentage values
-        # Normalize project names
-        extracted_data = normalize_project_names(extracted_data)
+        extracted_data = normalize_project_names(
+            extracted_data
+        )
 
-        # Normalize CGPA and percentage values
-        extracted_data = normalize_academic_scores(extracted_data)
+        extracted_data = normalize_academic_scores(
+            extracted_data
+        )
 
-        # Validate structured resume data
+        # 6. Validate using Pydantic.
         resume_details = ResumeDetails.model_validate(
             extracted_data
         )
 
-        logger.info("Resume extraction completed successfully")
+        logger.info(
+            "Resume extraction completed successfully"
+        )
+
         return resume_details
 
     except Exception:

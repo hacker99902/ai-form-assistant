@@ -1,7 +1,6 @@
-
 import json
 import logging
-
+from app.services.pii_redaction import redact_pii
 from groq import Groq
 from pydantic import ValidationError
 
@@ -153,8 +152,6 @@ ADDITIONAL INSTRUCTIONS:
 - Use null for unavailable values.
 - Do not include explanations outside the JSON.
 """
-
-
 def extract_marksheet_details(
     extracted_text: str
 ) -> MarksheetDetails:
@@ -162,11 +159,8 @@ def extract_marksheet_details(
     Extract structured academic information from marksheet
     or transcript text using Groq.
 
-    Args:
-        extracted_text: Text extracted from PDF/OCR.
-
-    Returns:
-        Validated MarksheetDetails object.
+    Sensitive information is redacted locally before
+    sending the extracted text to Groq.
     """
 
     if not extracted_text or not extracted_text.strip():
@@ -180,6 +174,19 @@ def extract_marksheet_details(
 
     try:
 
+        # 1. Redact sensitive information locally.
+        safe_text = redact_pii(extracted_text)
+
+        logger.info(
+            "PII redaction applied before marksheet extraction."
+        )
+
+        # 2. Build the prompt using redacted text.
+        extraction_prompt = build_extraction_prompt(
+            safe_text
+        )
+
+        # 3. Send sanitized text to Groq.
         response = client.chat.completions.create(
             model=settings.GROQ_MODEL,
 
@@ -190,9 +197,7 @@ def extract_marksheet_details(
                 },
                 {
                     "role": "user",
-                    "content": build_extraction_prompt(
-                        extracted_text
-                    )
+                    "content": extraction_prompt
                 }
             ],
 
@@ -215,7 +220,7 @@ def extract_marksheet_details(
             "Groq marksheet extraction response received."
         )
 
-        # Parse JSON
+        # 4. Parse JSON.
         try:
             extracted_data = json.loads(response_content)
 
@@ -229,7 +234,7 @@ def extract_marksheet_details(
                 "Groq returned invalid JSON."
             ) from error
 
-        # Validate using Pydantic
+        # 5. Validate using Pydantic.
         try:
             validated_data = MarksheetDetails.model_validate(
                 extracted_data
