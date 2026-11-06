@@ -1,17 +1,22 @@
+
 import json
 import logging
-from app.services.pii_redaction import redact_pii
+
 from groq import Groq
 from pydantic import ValidationError
 
 from app.core.config import settings
 from app.schemas.marksheet import MarksheetDetails
+from app.services.pii_redaction import redact_pii
 
 
 logger = logging.getLogger(__name__)
 
 
-# Reuse the existing Groq configuration
+# ==========================================
+# GROQ CLIENT
+# ==========================================
+
 client = Groq(
     api_key=settings.GROQ_API_KEY,
     timeout=120.0,
@@ -19,60 +24,150 @@ client = Groq(
 )
 
 
+# ==========================================
+# SYSTEM PROMPT
+# ==========================================
+
 SYSTEM_PROMPT = """
 You are an expert academic document information extraction system.
 
-Your task is to extract structured information from Indian academic
-marksheets and transcripts.
+You specialize in Indian academic documents, including:
 
-IMPORTANT RULES:
+- Class 10 / SSLC marksheets
+- Class 12 / PUC marksheets
+- CBSE marksheets
+- ICSE marksheets
+- State board marksheets
+- Diploma marksheets
+- Engineering semester marksheets
+- Consolidated university transcripts
 
-1. Extract information ONLY from the supplied document text.
+Your task is to extract accurate, structured information
+from the supplied document text.
 
-2. Never invent student details, marks, grades, credits or results.
+GENERAL RULES:
 
-3. If a field is unavailable, return null.
+1. Extract information ONLY from the supplied document.
 
-4. Do not calculate missing marks, percentages, SGPA or CGPA.
+2. Never invent student details, marks, grades, results,
+   registration numbers or contact information.
 
-5. Preserve student names, USN, subject codes and subject names
-   exactly as they appear.
+3. If information is unavailable, return null.
 
-6. Identify every semester present in the document.
+4. Preserve names, subject names, subject codes and
+   registration numbers exactly as printed.
 
-7. Extract every subject separately.
+5. Do not confuse student names with parent names.
 
-8. Preserve the original marks and grade information.
+6. Do not confuse maximum marks with marks obtained.
 
-9. Do not confuse:
-   - Maximum marks with marks obtained.
-   - Internal marks with external marks.
-   - SGPA with CGPA.
-   - Subject grade with grade points.
+7. Do not confuse internal marks with external marks.
 
-10. If a transcript contains multiple semesters, include every
-    semester in the semesters array.
+8. Do not confuse SGPA with CGPA.
 
-11. If the document is a single semester marksheet, include that
-    semester in the semesters array.
+9. Do not calculate missing marks, percentages or grades.
 
-12. Do not assume a grading scale or calculate percentage from CGPA.
-
-13. Confidence must represent the reliability of the extraction,
+10. Confidence must represent extraction reliability,
     not academic performance.
 
-14. Use document_type:
-    - "marksheet" for an individual marksheet.
-    - "transcript" for a consolidated transcript.
+PERSONAL INFORMATION:
 
-15. Return ONLY valid JSON.
+Extract these fields whenever explicitly present:
+
+- full_name
+- father_name
+- mother_name
+- date_of_birth
+- mobile_number
+- email
+
+Recognize different printed labels.
+
+For mother's name, look for:
+
+- Mother's Name
+- Mother Name
+- Name of Mother
+- MOTHER
+- M/O
+
+For father's name, look for:
+
+- Father's Name
+- Father Name
+- Name of Father
+- FATHER
+- F/O
+
+IMPORTANT:
+
+Do not assign a father's name to mother_name.
+
+Do not assign a mother's name to father_name.
+
+Do not assume that M/O or F/O always contains a complete
+parent name. Extract only when the relationship is clear.
+
+INSTITUTION INFORMATION:
+
+Extract:
+
+- school_name
+- board
+- college_name
+- university_name
+- degree
+- branch
+- stream
+
+IDENTIFICATION INFORMATION:
+
+Extract:
+
+- roll_number
+- registration_number
+- usn
+
+ACADEMIC INFORMATION:
+
+1. Identify every semester present.
+
+2. Extract every subject separately.
+
+3. Preserve subject codes and names.
+
+4. Extract credits, maximum marks, obtained marks,
+   internal marks, external marks, grades and grade points
+   whenever available.
+
+5. Extract semester total marks and SGPA.
+
+6. Extract overall total marks, maximum marks,
+   percentage, CGPA and overall result when printed.
+
+7. Extract year of passing.
+
+8. Do not assume a grading scale.
+
+DOCUMENT TYPE:
+
+- Use "marksheet" for an individual marksheet.
+- Use "transcript" for a consolidated transcript.
+
+Return only valid JSON matching the requested structure.
+Do not include explanations outside JSON.
 """
 
+
+# ==========================================
+# EXTRACTION PROMPT
+# ==========================================
 
 def build_extraction_prompt(extracted_text: str) -> str:
 
     return f"""
-Extract all academic information from the following document.
+Extract all available student and academic information
+from the following document.
 
 DOCUMENT TEXT:
 
@@ -83,21 +178,28 @@ DOCUMENT TEXT:
 ---------------- DOCUMENT END ----------------
 
 
-Return JSON following this exact structure:
+Return JSON using exactly this structure:
 
 {{
     "document_type": "marksheet",
 
     "student": {{
         "full_name": null,
-        "usn": null,
+        "father_name": null,
+        "mother_name": null,
+        "date_of_birth": null,
+        "mobile_number": null,
+        "email": null,
+        "school_name": null,
+        "board": null,
         "roll_number": null,
         "registration_number": null,
-        "date_of_birth": null,
+        "usn": null,
         "college_name": null,
         "university_name": null,
         "degree": null,
-        "branch": null
+        "branch": null,
+        "stream": null
     }},
 
     "semesters": [
@@ -143,24 +245,50 @@ Return JSON following this exact structure:
     "missing_fields": []
 }}
 
+
 ADDITIONAL INSTRUCTIONS:
 
-- Use "transcript" if multiple semester records are present.
-- Include all subjects visible in the document.
-- Do not create empty semester records.
-- If there are no subjects, return an empty subjects array.
-- Use null for unavailable values.
-- Do not include explanations outside the JSON.
+1. Extract mother's name separately from father's name.
+
+2. Extract parent names even when they appear near
+   the student's name or in the personal details section.
+
+3. Extract school and board names from the document heading
+   or institution details.
+
+4. Extract every subject visible in the document.
+
+5. Do not omit subjects simply because their marks are absent.
+
+6. For individual Class 10 and Class 12 marksheets,
+   use a semester record only when the document actually
+   represents a semester-based examination.
+
+7. For consolidated transcripts, include every semester.
+
+8. Do not create fictional semester records.
+
+9. Use null for unavailable values.
+
+10. Do not calculate missing values.
+
+11. Return only valid JSON.
 """
+
+
+# ==========================================
+# MARKSHEET EXTRACTION
+# ==========================================
+
 def extract_marksheet_details(
     extracted_text: str
 ) -> MarksheetDetails:
     """
-    Extract structured academic information from marksheet
-    or transcript text using Groq.
+    Extract structured student and academic information
+    from marksheet or transcript text using Groq.
 
-    Sensitive information is redacted locally before
-    sending the extracted text to Groq.
+    PII redaction is applied locally before sending
+    document text to the external model.
     """
 
     if not extracted_text or not extracted_text.strip():
@@ -178,16 +306,17 @@ def extract_marksheet_details(
         safe_text = redact_pii(extracted_text)
 
         logger.info(
-            "PII redaction applied before marksheet extraction."
+            "PII redaction applied before extraction."
         )
 
-        # 2. Build the prompt using redacted text.
+        # 2. Build extraction prompt.
         extraction_prompt = build_extraction_prompt(
             safe_text
         )
 
-        # 3. Send sanitized text to Groq.
+        # 3. Send sanitized document text to Groq.
         response = client.chat.completions.create(
+
             model=settings.GROQ_MODEL,
 
             messages=[
@@ -206,10 +335,13 @@ def extract_marksheet_details(
             },
 
             temperature=0.1,
+
             max_tokens=8000
         )
 
-        response_content = response.choices[0].message.content
+        response_content = (
+            response.choices[0].message.content
+        )
 
         if not response_content:
             raise ValueError(
@@ -222,9 +354,13 @@ def extract_marksheet_details(
 
         # 4. Parse JSON.
         try:
-            extracted_data = json.loads(response_content)
+
+            extracted_data = json.loads(
+                response_content
+            )
 
         except json.JSONDecodeError as error:
+
             logger.error(
                 "Invalid JSON returned by Groq: %s",
                 error
@@ -234,13 +370,15 @@ def extract_marksheet_details(
                 "Groq returned invalid JSON."
             ) from error
 
-        # 5. Validate using Pydantic.
+        # 5. Validate extracted information.
         try:
+
             validated_data = MarksheetDetails.model_validate(
                 extracted_data
             )
 
         except ValidationError as error:
+
             logger.error(
                 "Marksheet schema validation failed: %s",
                 error
@@ -257,7 +395,9 @@ def extract_marksheet_details(
         return validated_data
 
     except Exception:
+
         logger.exception(
             "Marksheet extraction failed."
         )
+
         raise

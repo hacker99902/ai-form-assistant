@@ -1,0 +1,123 @@
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    width: 340px;
+    font-family: Arial, sans-serif;
+    background: #f5f7fb;
+    color: #1e293b;
+}
+
+.container {
+    padding: 20px;
+}
+
+header {
+    margin-bottom: 22px;
+}
+
+header h2 {
+    font-size: 21px;
+    color: #1d4ed8;
+    margin-bottom: 7px;
+}
+
+header p {
+    color: #64748b;
+    font-size: 13px;
+}
+
+.profile-section {
+    background: white;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 18px;
+}
+
+.profile-section h3 {
+    font-size: 15px;
+    margin-bottom: 10px;
+}
+
+#profileStatus {
+    font-size: 13px;
+    color: #64748b;
+    line-height: 1.5;
+}
+
+.actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+button {
+    width: 100%;
+    padding: 12px;
+    border: none;
+    border-radius: 7px;
+    background: #2563eb;
+    color: white;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #1d4ed8;
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+#refreshProfileButton {
+    background: #475569;
+}
+
+#refreshProfileButton:hover {
+    background: #334155;
+}
+
+#statusMessage {
+    margin-top: 16px;
+    font-size: 12px;
+    color: #64748b;
+    line-height: 1.5;
+}
+
+footer {
+    border-top: 1px solid #e2e8f0;
+    margin-top: 20px;
+    padding-top: 12px;
+    text-align: center;
+}
+
+footer p {
+    font-size: 11px;
+    color: #94a3b8;
+}
+
+#profileIdInput {
+    width: 100%;
+    padding: 10px;
+    margin-top: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-size: 12px;
+}
+
+#connectProfileButton {
+    background: #0f766e;
+}
+
+#connectProfileButton:hover {
+    background: #115e59;
+}

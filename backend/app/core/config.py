@@ -11,8 +11,13 @@ class Settings(BaseSettings):
 
     GROQ_API_KEY: str
     GROQ_MODEL: str = "openai/gpt-oss-20b"
-
     FIELD_ENCRYPTION_KEY: str
+    GOOGLE_CLIENT_ID: str
+    GOOGLE_CLIENT_SECRET: str
+    SESSION_SECRET: str
+    JWT_SECRET: str
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
     model_config = SettingsConfigDict(
         env_file=".env",

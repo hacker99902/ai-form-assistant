@@ -1,9 +1,9 @@
-
 from contextlib import asynccontextmanager
-
+from app.api.auth import router as auth_router
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
+from starlette.middleware.sessions import SessionMiddleware
+from app.core.config import settings
 from app.api.database import router as database_router
 from app.api.documents import router as documents_router
 from app.core.database import pool
@@ -30,10 +30,6 @@ app = FastAPI(
 )
 
 
-origins = [
-    "http://localhost:5500",
-    "http://127.0.0.1:5500",
-]
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,7 +43,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.SESSION_SECRET,
+    same_site="lax",
+    https_only=False,  # Local development only
+)
 
 app.include_router(
     database_router,
@@ -60,7 +61,11 @@ app.include_router(
     prefix="/api/v1/documents",
     tags=["Documents"],
 )
-
+app.include_router(
+    auth_router,
+    prefix="/api/v1/auth",
+    tags=["Authentication"],
+)
 
 @app.get("/")
 async def root():

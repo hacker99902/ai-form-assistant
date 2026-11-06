@@ -1,6 +1,17 @@
 
 const API_BASE_URL = "http://127.0.0.1:8000/api/v1";
 
+// Centralized API request helper.
+// Sends the Google login session cookie with every request.
+async function apiRequest(url, options = {}) {
+    const response = await fetch(url, {
+        ...options,
+        credentials: "include"
+    });
+
+    return await handleResponse(response);
+}
+
 // Handle API responses
 async function handleResponse(response) {
     const data = await response.json().catch(() => ({}));
@@ -19,12 +30,11 @@ async function handleResponse(response) {
 
 // Create a processing session
 async function createSession() {
-    const response = await fetch(
+    const data = await apiRequest(
         `${API_BASE_URL}/documents/sessions`,
         { method: "POST" }
     );
 
-    const data = await handleResponse(response);
     return data.session.id;
 }
 
@@ -33,49 +43,41 @@ async function uploadPDF(sessionId, file) {
     const formData = new FormData();
     formData.append("file", file);
 
-    const response = await fetch(
+    return await apiRequest(
         `${API_BASE_URL}/documents/upload?session_id=${encodeURIComponent(sessionId)}`,
         {
             method: "POST",
             body: formData
         }
     );
-
-    return await handleResponse(response);
 }
 
 // Classify uploaded document
 async function classifyDocument(documentId) {
-    const response = await fetch(
+    return await apiRequest(
         `${API_BASE_URL}/documents/${documentId}/classify`,
         { method: "POST" }
     );
-
-    return await handleResponse(response);
 }
 
 // Extract Aadhaar information
 async function extractAadhaar(extractedDocumentId) {
-    const response = await fetch(
+    return await apiRequest(
         `${API_BASE_URL}/documents/extracted/${extractedDocumentId}/extract-aadhaar`,
         { method: "POST" }
     );
-
-    return await handleResponse(response);
 }
 
 // Get extracted document review
 async function getDocumentReview(extractedDocumentId) {
-    const response = await fetch(
+    return await apiRequest(
         `${API_BASE_URL}/documents/extracted/${extractedDocumentId}/review`
     );
-
-    return await handleResponse(response);
 }
 
 // Update extracted profile fields
 async function updateProfileFields(extractedDocumentId, fields) {
-    const response = await fetch(
+    return await apiRequest(
         `${API_BASE_URL}/documents/extracted/${extractedDocumentId}/fields`,
         {
             method: "PUT",
@@ -85,40 +87,32 @@ async function updateProfileFields(extractedDocumentId, fields) {
             body: JSON.stringify({ fields })
         }
     );
-
-    return await handleResponse(response);
 }
 
-// Save profile as a draft (no field verification required)
+// Save profile as a draft
 async function saveProfile(extractedDocumentId) {
-    const response = await fetch(
+    return await apiRequest(
         `${API_BASE_URL}/documents/extracted/${extractedDocumentId}/save-profile`,
         { method: "POST" }
     );
-
-    return await handleResponse(response);
 }
 
 // Retrieve saved profile using profile ID
 async function getSavedProfile(profileId) {
-    const response = await fetch(
+    return await apiRequest(
         `${API_BASE_URL}/documents/profiles/${encodeURIComponent(profileId)}`
     );
-
-    return await handleResponse(response);
 }
 
-// Legacy function — retained temporarily for compatibility
+// Legacy function — retained temporarily
 async function saveVerifiedProfile(extractedDocumentId) {
     return await saveProfile(extractedDocumentId);
 }
 
-// Legacy verification function — not needed in the new workflow
+// Legacy verification function
 async function verifyProfileField(extractedDocumentId, fieldName) {
-    const response = await fetch(
+    return await apiRequest(
         `${API_BASE_URL}/documents/extracted/${extractedDocumentId}/fields/${encodeURIComponent(fieldName)}/verify`,
         { method: "POST" }
     );
-
-    return await handleResponse(response);
 }

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Form Assistant</title>
+
+    <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+
+    <div class="container">
+
+        <header>
+            <h2>AI Form Assistant</h2>
+            <p>Fill website forms intelligently.</p>
+        </header>
+
+
+        <div class="profile-section">
+            <h3>Student Profile</h3>
+
+            <p id="profileStatus">
+                Checking profile...
+            </p>
+
+            <label for="profileIdInput">Profile ID</label>
+
+            <input type="text" id="profileIdInput" placeholder="Paste your saved profile ID">
+
+            <button id="connectProfileButton">
+                Connect Profile
+            </button>
+        </div>
+
+
+        <div class="actions">
+
+            <button id="fillFormButton">
+                ✨ Fill This Website
+            </button>
+
+            <button id="refreshProfileButton">
+                Refresh Profile
+            </button>
+
+        </div>
+
+        <p id="statusMessage">
+            Ready to assist.
+        </p>
+
+        <footer>
+            <p>AI Form Assistant v1.0.0</p>
+        </footer>
+
+    </div>
+
+    <script src="popup.js"></script>
+
+</body>
+
+</html>

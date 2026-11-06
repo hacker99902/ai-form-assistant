@@ -25,7 +25,8 @@ from app.services.marksheet_extraction import (
 from app.services.ocr_service import extract_text_from_image
 from app.services.classification_service import classify_documents
 from app.schemas.marksheet import MarksheetCorrectionRequest
-
+import os
+from fastapi import Request
 from app.services.resume_extraction import extract_resume_details
 import logging
 
@@ -1664,7 +1665,89 @@ def get_saved_profile(profile_id: UUID):
             status_code=500,
             detail="An error occurred while retrieving the profile"
         )
+@router.get("/profiles/{profile_id}/aadhaar")
+def get_full_aadhaar(profile_id: UUID, request: Request):
 
+    # Allow only explicitly enabled local testing
+    if os.getenv("ENABLE_LOCAL_AADHAAR_FILL") != "true":
+        raise HTTPException(
+            status_code=403,
+            detail="Full Aadhaar retrieval is disabled"
+        )
+
+    if request.client is None or request.client.host not in (
+        "127.0.0.1",
+        "::1"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="This endpoint is available only locally"
+        )
+
+    pool = get_db_pool()
+
+    try:
+        with pool.connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT profile_data
+                    FROM verified_profiles
+                    WHERE id = %s
+                    """,
+                    (profile_id,)
+                )
+
+                result = cursor.fetchone()
+
+        if not result:
+            raise HTTPException(
+                status_code=404,
+                detail="Profile not found"
+            )
+
+        profile_data = dict(result[0])
+        encrypted_value = profile_data.get("aadhaar_number")
+
+        if not encrypted_value:
+            raise HTTPException(
+                status_code=404,
+                detail="Aadhaar number not found in profile"
+            )
+
+        if not encrypted_value.startswith("fernet:v1:"):
+            raise HTTPException(
+                status_code=500,
+                detail="Unexpected Aadhaar storage format"
+            )
+
+        encrypted_value = encrypted_value.removeprefix("fernet:v1:")
+
+        aadhaar = decrypt_value(encrypted_value)
+
+        digits = "".join(
+            char for char in aadhaar if char.isdigit()
+        )
+
+        if len(digits) != 12:
+            raise HTTPException(
+                status_code=500,
+                detail="Stored Aadhaar number is invalid"
+            )
+
+        return {
+            "aadhaar_number": digits
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        logger.exception("Failed to retrieve Aadhaar")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not retrieve Aadhaar information"
+        )
 
 @router.post("/profiles/{profile_id}/approve")
 def approve_saved_profile(profile_id: UUID):
