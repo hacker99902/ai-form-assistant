@@ -1407,8 +1407,12 @@ def verify_profile_field(
         )
 
 @router.post("/extracted/{extracted_document_id}/save-profile")
-
-def save_verified_profile(extracted_document_id: UUID):
+def save_profile(extracted_document_id: UUID):
+    """
+    Save extracted profile information automatically.
+    Individual field verification is not required.
+    The profile is stored as a draft.
+    """
 
     pool = get_db_pool()
 
@@ -1416,17 +1420,14 @@ def save_verified_profile(extracted_document_id: UUID):
         with pool.connection() as conn:
             with conn.cursor() as cursor:
 
-                # 1. Get the processing session associated with this document
-                cursor.execute(
-                    """
+                # 1. Get the session associated with the document.
+                cursor.execute("""
                     SELECT d.session_id
                     FROM extracted_documents ed
                     JOIN documents d ON d.id = ed.document_id
                     WHERE ed.id = %s
                     FOR UPDATE OF ed, d
-                    """,
-                    (extracted_document_id,)
-                )
+                """, (extracted_document_id,))
 
                 document = cursor.fetchone()
 
@@ -1438,21 +1439,17 @@ def save_verified_profile(extracted_document_id: UUID):
 
                 session_id = document[0]
 
-                # 2. Fetch all extracted profile fields
-                cursor.execute(
-                    """
+                # 2. Retrieve extracted fields and corrections.
+                cursor.execute("""
                     SELECT
                         field_name,
                         extracted_value,
-                        corrected_value,
-                        status
+                        corrected_value
                     FROM profile_fields
                     WHERE extracted_document_id = %s
                     ORDER BY field_name
                     FOR UPDATE
-                    """,
-                    (extracted_document_id,)
-                )
+                """, (extracted_document_id,))
 
                 rows = cursor.fetchall()
 
@@ -1462,26 +1459,10 @@ def save_verified_profile(extracted_document_id: UUID):
                         detail="No profile fields found"
                     )
 
-                # 3. Ensure every field has been verified
-                unverified_fields = [
-                    row[0]
-                    for row in rows
-                    if row[3] != "verified"
-                ]
-
-                if unverified_fields:
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "message": "All fields must be verified before saving the profile",
-                            "unverified_fields": unverified_fields
-                        }
-                    )
-
-                # 4. Build the consolidated profile
+                # 3. Build profile using the latest available values.
                 profile_data = {}
 
-                for field_name, extracted_value, corrected_value, status in rows:
+                for field_name, extracted_value, corrected_value in rows:
 
                     value = (
                         corrected_value
@@ -1489,70 +1470,84 @@ def save_verified_profile(extracted_document_id: UUID):
                         else extracted_value
                     )
 
+                    # Skip missing or empty fields.
                     if value is None or not str(value).strip():
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Field '{field_name}' has an empty value"
-                        )
+                        continue
 
-                    # Keep Aadhaar encrypted in profile_data
+                    # Aadhaar must remain encrypted.
                     if field_name == "aadhaar_number":
-
-                        if not value.startswith("fernet:v1:"):
+                        if not str(value).startswith("fernet:v1:"):
                             raise HTTPException(
                                 status_code=500,
-                                detail="Aadhaar must be encrypted before profile storage"
+                                detail="Aadhaar encryption validation failed"
                             )
 
                     profile_data[field_name] = value
 
-                # 5. Prevent duplicate profile creation
-                cursor.execute(
-                    """
-                    SELECT id
+                if not profile_data:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="No usable profile information found"
+                    )
+
+                # 4. Check for an existing profile in this session.
+                cursor.execute("""
+                    SELECT id, status
                     FROM verified_profiles
                     WHERE session_id = %s
-                    """,
-                    (session_id,)
-                )
+                    FOR UPDATE
+                """, (session_id,))
 
                 existing_profile = cursor.fetchone()
 
                 if existing_profile:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="A profile already exists for this session"
-                    )
 
-                # 6. Save the consolidated profile as a draft
-                profile_id = uuid.uuid4()
+                    profile_id, current_status = existing_profile
 
-                cursor.execute(
-                    """
-                    INSERT INTO verified_profiles (
-                        id,
-                        session_id,
-                        profile_data,
-                        status,
-                        approved_at
-                    )
-                    VALUES (%s, %s, %s, 'draft', NULL)
-                    RETURNING id, status, created_at
-                    """,
-                    (
-                        profile_id,
+                    if current_status != "draft":
+                        raise HTTPException(
+                            status_code=409,
+                            detail="An approved profile cannot be overwritten"
+                        )
+
+                    # Update existing draft instead of creating duplicates.
+                    cursor.execute("""
+                        UPDATE verified_profiles
+                        SET profile_data = %s
+                        WHERE id = %s
+                        RETURNING id, status, created_at
+                    """, (
+                        Jsonb(profile_data),
+                        profile_id
+                    ))
+
+                else:
+
+                    # 5. Create a new draft profile.
+                    cursor.execute("""
+                        INSERT INTO verified_profiles (
+                            id,
+                            session_id,
+                            profile_data,
+                            status,
+                            approved_at
+                        )
+                        VALUES (%s, %s, %s, 'draft', NULL)
+                        RETURNING id, status, created_at
+                    """, (
+                        uuid.uuid4(),
                         session_id,
                         Jsonb(profile_data)
-                    )
-                )
+                    ))
 
                 saved_profile = cursor.fetchone()
 
         return {
-            "message": "Verified profile saved successfully",
+            "message": "Profile saved successfully",
             "profile_id": str(saved_profile[0]),
             "session_id": str(session_id),
             "status": saved_profile[1],
+            "fields_saved": list(profile_data.keys()),
             "created_at": saved_profile[2].isoformat()
         }
 
@@ -1560,15 +1555,14 @@ def save_verified_profile(extracted_document_id: UUID):
         raise
 
     except Exception:
-        logger.exception("Failed to save verified profile")
+        logger.exception("Failed to save profile")
 
         raise HTTPException(
             status_code=500,
-            detail="An error occurred while saving the verified profile"
+            detail="An error occurred while saving the profile"
         )
 
 @router.get("/profiles/{profile_id}")
-
 def get_saved_profile(profile_id: UUID):
 
     pool = get_db_pool()
