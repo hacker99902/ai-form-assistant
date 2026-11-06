@@ -4,64 +4,498 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
     <title>AI Form Assistant</title>
-
     <link rel="stylesheet" href="css/style.css">
 </head>
-
 <body>
 
-    <main class="container">
+<main class="container">
 
+    <!-- HOME / UPLOAD PAGE -->
+    <section id="homeSection">
         <header>
             <h1>AI Form Assistant</h1>
-            <p>Upload your documents. We'll extract the information for you.</p>
+            <p>Upload your documents. Let AI fill your forms.</p>
         </header>
 
         <section class="upload-section">
-            <input
-                type="file"
-                id="pdfInput"
-                accept=".pdf,application/pdf"
-            >
+            <input type="file" id="pdfInput" accept=".pdf,application/pdf">
+            <button id="uploadButton">Upload and Process</button>
+        </section>
+    </section>
 
-            <button id="uploadButton">
-                Upload and Process
+    <p id="status" role="status"></p>
+
+    <!-- EXTRACTED PROFILE REVIEW -->
+    <section id="reviewSection" hidden>
+
+        <div class="section-heading">
+            <h2>Extracted Information</h2>
+            <span id="reviewStatus">Needs review</span>
+        </div>
+
+        <p class="hint">
+            Your documents have been processed. Proceed to create your form.
+        </p>
+
+        <div id="fieldsContainer"></div>
+
+        <div class="actions">
+            <button id="saveChangesButton" class="secondary" hidden>
+                Save Corrections
             </button>
+
+            <button id="saveProfileButton" hidden>
+                Save Profile
+            </button>
+        </div>
+
+        <button id="proceedButton" hidden>
+            Proceed to Form →
+        </button>
+
+    </section>
+
+
+    <!-- MULTI-PAGE STUDENT REGISTRATION FORM -->
+    <section id="formSection" hidden>
+
+        <div class="form-header">
+
+            <button id="fillFormButton">
+                ✨ Fill Form
+            </button>
+
+            <h2>Student Registration Form</h2>
+            <p>Complete your academic and personal information.</p>
+
+        </div>
+
+        <!-- PROGRESS -->
+        <div class="form-progress">
+            <div class="progress-info">
+                <span id="pageTitle">Personal Information</span>
+                <span id="pageCounter">Page 1 of 5</span>
+            </div>
+
+            <div class="progress-track">
+                <div id="progressBar" class="progress-fill"></div>
+            </div>
+        </div>
+
+
+        <!-- PAGE 1: PERSONAL INFORMATION -->
+        <section class="form-page active" data-page="1">
+
+            <h3>1. Personal Information</h3>
+            <p class="hint">Enter your personal and contact details.</p>
+
+            <div class="field">
+                <label for="formName">Full Name</label>
+                <input id="formName" type="text">
+            </div>
+
+            <div class="field">
+                <label for="formDOB">Date of Birth</label>
+                <input id="formDOB" type="date">
+            </div>
+
+            <div class="field">
+                <label for="formGender">Gender</label>
+                <select id="formGender">
+                    <option value="">Select Gender</option>
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Other">Other</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <label for="formAadhaar">Aadhaar Number</label>
+                <input
+                    id="formAadhaar"
+                    type="text"
+                    maxlength="12"
+                    inputmode="numeric"
+                    autocomplete="off"
+                    placeholder="Enter Aadhaar number"
+                >
+            </div>
+
+            <div class="field">
+                <label for="formFather">Father / Husband Name</label>
+                <input id="formFather" type="text">
+            </div>
+
+            <div class="field">
+                <label for="formMother">Mother's Name</label>
+                <input id="formMother" type="text">
+            </div>
+
+            <div class="field">
+                <label for="formAddress">Address</label>
+                <textarea id="formAddress" rows="3"></textarea>
+            </div>
+
+            <div class="field">
+                <label for="formMobile">Mobile Number</label>
+                <input id="formMobile" type="tel">
+            </div>
+
+            <div class="field">
+                <label for="formEmail">Email Address</label>
+                <input id="formEmail" type="email">
+            </div>
+
         </section>
 
-        <p id="status" role="status"></p>
 
-        <section id="reviewSection" hidden>
+        <!-- PAGE 2: CLASS 10 -->
+        <section class="form-page" data-page="2" hidden>
 
-            <div class="section-heading">
-                <h2>Extracted Information</h2>
-                <span id="reviewStatus">Needs review</span>
+            <h3>2. Class 10 (SSLC) Information</h3>
+            <p class="hint">Enter your secondary school examination details.</p>
+
+            <div class="field">
+                <label for="sslcBoard">Board</label>
+                <input id="sslcBoard" type="text" placeholder="CBSE / KSEAB / ICSE">
             </div>
+
+            <div class="field">
+                <label for="sslcSchool">School Name</label>
+                <input id="sslcSchool" type="text">
+            </div>
+
+            <div class="field">
+                <label for="sslcRegNo">Registration Number</label>
+                <input id="sslcRegNo" type="text">
+            </div>
+
+            <div class="field">
+                <label for="sslcRollNo">Roll Number</label>
+                <input id="sslcRollNo" type="text">
+            </div>
+
+            <div class="field">
+                <label for="sslcYear">Passing Year</label>
+                <input id="sslcYear" type="number">
+            </div>
+
+            <h4>Subject-wise Marks</h4>
+
+            <div class="field">
+                <label for="sslcEnglish">English</label>
+                <input id="sslcEnglish" type="number">
+            </div>
+
+            <div class="field">
+                <label for="sslcLanguage">Second Language</label>
+                <input id="sslcLanguage" type="number">
+            </div>
+
+            <div class="field">
+                <label for="sslcMaths">Mathematics</label>
+                <input id="sslcMaths" type="number">
+            </div>
+
+            <div class="field">
+                <label for="sslcScience">Science</label>
+                <input id="sslcScience" type="number">
+            </div>
+
+            <div class="field">
+                <label for="sslcSocial">Social Science</label>
+                <input id="sslcSocial" type="number">
+            </div>
+
+            <div class="field">
+                <label for="sslcTotal">Total Marks</label>
+                <input id="sslcTotal" type="number">
+            </div>
+
+            <div class="field">
+                <label for="sslcPercentage">Percentage</label>
+                <input id="sslcPercentage" type="number" step="0.01">
+            </div>
+
+            <div class="field">
+                <label for="sslcGrade">Grade</label>
+                <input id="sslcGrade" type="text">
+            </div>
+
+            <div class="field">
+                <label for="sslcResult">Result</label>
+                <select id="sslcResult">
+                    <option value="">Select Result</option>
+                    <option value="Pass">Pass</option>
+                    <option value="Fail">Fail</option>
+                </select>
+            </div>
+
+        </section>
+
+
+        <!-- PAGE 3: CLASS 12 -->
+        <section class="form-page" data-page="3" hidden>
+
+            <h3>3. Class 12 (PUC) Information</h3>
+            <p class="hint">Enter your Pre-University examination details.</p>
+
+            <div class="field">
+                <label for="pucBoard">Board</label>
+                <input id="pucBoard" type="text" placeholder="KSEAB / CBSE">
+            </div>
+
+            <div class="field">
+                <label for="pucCollege">College Name</label>
+                <input id="pucCollege" type="text">
+            </div>
+
+            <div class="field">
+                <label for="pucRegNo">Registration Number</label>
+                <input id="pucRegNo" type="text">
+            </div>
+
+            <div class="field">
+                <label for="pucRollNo">Roll Number</label>
+                <input id="pucRollNo" type="text">
+            </div>
+
+            <div class="field">
+                <label for="pucYear">Passing Year</label>
+                <input id="pucYear" type="number">
+            </div>
+
+            <div class="field">
+                <label for="pucStream">Stream</label>
+                <select id="pucStream">
+                    <option value="">Select Stream</option>
+                    <option value="Science">Science</option>
+                    <option value="Commerce">Commerce</option>
+                    <option value="Arts">Arts</option>
+                </select>
+            </div>
+
+            <h4>Subject-wise Marks</h4>
+
+            <div class="field">
+                <label for="pucEnglish">English</label>
+                <input id="pucEnglish" type="number">
+            </div>
+
+            <div class="field">
+                <label for="pucLanguage">Second Language</label>
+                <input id="pucLanguage" type="number">
+            </div>
+
+            <div class="field">
+                <label for="pucSubject1">Subject 1</label>
+                <input id="pucSubject1" type="number">
+            </div>
+
+            <div class="field">
+                <label for="pucSubject2">Subject 2</label>
+                <input id="pucSubject2" type="number">
+            </div>
+
+            <div class="field">
+                <label for="pucSubject3">Subject 3</label>
+                <input id="pucSubject3" type="number">
+            </div>
+
+            <div class="field">
+                <label for="pucSubject4">Subject 4 (if applicable)</label>
+                <input id="pucSubject4" type="number">
+            </div>
+
+            <div class="field">
+                <label for="pucTotal">Total Marks</label>
+                <input id="pucTotal" type="number">
+            </div>
+
+            <div class="field">
+                <label for="pucPercentage">Percentage</label>
+                <input id="pucPercentage" type="number" step="0.01">
+            </div>
+
+            <div class="field">
+                <label for="pucGrade">Grade</label>
+                <input id="pucGrade" type="text">
+            </div>
+
+            <div class="field">
+                <label for="pucResult">Result</label>
+                <select id="pucResult">
+                    <option value="">Select Result</option>
+                    <option value="Pass">Pass</option>
+                    <option value="Fail">Fail</option>
+                </select>
+            </div>
+
+        </section>
+
+
+        <!-- PAGE 4: ENGINEERING -->
+        <section class="form-page" data-page="4" hidden>
+
+            <h3>4. Engineering Information</h3>
+            <p class="hint">Enter your undergraduate academic details.</p>
+
+            <div class="field">
+                <label for="engUniversity">University</label>
+                <input id="engUniversity" type="text">
+            </div>
+
+            <div class="field">
+                <label for="engCollege">College Name</label>
+                <input id="engCollege" type="text">
+            </div>
+
+            <div class="field">
+                <label for="engUSN">USN</label>
+                <input id="engUSN" type="text">
+            </div>
+
+            <div class="field">
+                <label for="engBranch">Branch</label>
+                <select id="engBranch">
+                    <option value="">Select Branch</option>
+                    <option value="CSE">Computer Science</option>
+                    <option value="ISE">Information Science</option>
+                    <option value="ECE">Electronics and Communication</option>
+                    <option value="EEE">Electrical and Electronics</option>
+                    <option value="ME">Mechanical</option>
+                    <option value="Other">Other</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <label for="engSemester">Current Semester</label>
+                <select id="engSemester">
+                    <option value="">Select Semester</option>
+                    <option value="1">1st Semester</option>
+                    <option value="2">2nd Semester</option>
+                    <option value="3">3rd Semester</option>
+                    <option value="4">4th Semester</option>
+                    <option value="5">5th Semester</option>
+                    <option value="6">6th Semester</option>
+                    <option value="7">7th Semester</option>
+                    <option value="8">8th Semester</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <label for="engAcademicYear">Academic Year</label>
+                <input id="engAcademicYear" type="text" placeholder="2025-2026">
+            </div>
+
+            <div class="field">
+                <label for="engCGPA">CGPA</label>
+                <input id="engCGPA" type="number" step="0.01">
+            </div>
+
+            <div class="field">
+                <label for="engBacklogs">Number of Backlogs</label>
+                <input id="engBacklogs" type="number" min="0">
+            </div>
+
+            <h4>Semester-wise SGPA</h4>
+
+            <div class="field">
+                <label for="sgpa1">Semester 1 SGPA</label>
+                <input id="sgpa1" type="number" step="0.01">
+            </div>
+
+            <div class="field">
+                <label for="sgpa2">Semester 2 SGPA</label>
+                <input id="sgpa2" type="number" step="0.01">
+            </div>
+
+            <div class="field">
+                <label for="sgpa3">Semester 3 SGPA</label>
+                <input id="sgpa3" type="number" step="0.01">
+            </div>
+
+            <div class="field">
+                <label for="sgpa4">Semester 4 SGPA</label>
+                <input id="sgpa4" type="number" step="0.01">
+            </div>
+
+            <div class="field">
+                <label for="sgpa5">Semester 5 SGPA</label>
+                <input id="sgpa5" type="number" step="0.01">
+            </div>
+
+            <div class="field">
+                <label for="sgpa6">Semester 6 SGPA</label>
+                <input id="sgpa6" type="number" step="0.01">
+            </div>
+
+            <div class="field">
+                <label for="sgpa7">Semester 7 SGPA</label>
+                <input id="sgpa7" type="number" step="0.01">
+            </div>
+
+            <div class="field">
+                <label for="sgpa8">Semester 8 SGPA</label>
+                <input id="sgpa8" type="number" step="0.01">
+            </div>
+
+        </section>
+
+
+        <!-- PAGE 5: REVIEW -->
+        <section class="form-page" data-page="5" hidden>
+
+            <h3>5. Review & Submit</h3>
 
             <p class="hint">
-                Check the extracted information and correct anything that is wrong.
+                Review your information before submitting the registration form.
+                You can return to previous pages to make corrections.
             </p>
 
-            <div id="fieldsContainer"></div>
+            <div id="finalReview">
+                <p>Your entered information will be reviewed here.</p>
+            </div>
 
-            <div class="actions">
-                <button id="saveChangesButton" class="secondary">
-                    Save Corrections
-                </button>
-
-                <button id="saveProfileButton">
-                    Save Verified Profile
-                </button>
+            <div class="field">
+                <label>
+                    <input type="checkbox" id="confirmInformation">
+                    I confirm that the information provided is correct.
+                </label>
             </div>
 
         </section>
 
-    </main>
 
-    <script src="js/api.js"></script>
-    <script src="js/main.js"></script>
+        <!-- NAVIGATION -->
+        <div class="form-navigation">
+
+            <button id="previousPageButton" class="secondary" disabled>
+                ← Previous
+            </button>
+
+            <button id="nextPageButton">
+                Next →
+            </button>
+
+            <button id="finalSubmitButton" hidden>
+                Submit Registration
+            </button>
+
+        </div>
+
+        <!-- Existing submission button retained for compatibility -->
+        <button id="submitFormButton" hidden>
+            Submit Form
+        </button>
+
+    </section>
+
+</main>
+
+<script src="js/api.js"></script>
+<script src="js/main.js"></script>
 
 </body>
 </html>

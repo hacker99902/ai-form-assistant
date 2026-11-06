@@ -148,3 +148,116 @@ button.secondary:hover {
 [hidden] {
     display: none !important;
 }
+textarea {
+    width: 100%;
+    padding: 11px;
+    border: 1px solid #d5d9e2;
+    border-radius: 6px;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    resize: vertical;
+}
+
+textarea:focus {
+    outline: none;
+    border-color: #2563eb;
+}
+
+#proceedButton {
+    margin-top: 20px;
+    width: 100%;
+}
+
+.form-header {
+    margin-bottom: 25px;
+}
+
+.form-header h2 {
+    margin-bottom: 5px;
+}
+
+.form-header p {
+    color: #666;
+}
+
+#fillFormButton {
+    margin-bottom: 20px;
+}
+
+/* ==========================================
+   MULTI-PAGE FORM
+========================================== */
+
+.form-progress {
+    margin: 25px 0;
+}
+
+.progress-info {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    font-weight: 600;
+}
+
+.progress-track {
+    height: 8px;
+    background: #e5e7eb;
+    border-radius: 20px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    width: 20%;
+    background: #2563eb;
+    border-radius: 20px;
+    transition: width 0.3s ease;
+}
+
+.form-page {
+    margin-top: 25px;
+}
+
+.form-page h3 {
+    margin-bottom: 8px;
+}
+
+.form-page h4 {
+    margin-top: 25px;
+}
+
+.form-navigation {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 30px;
+}
+
+.form-navigation button {
+    min-width: 110px;
+}
+
+.form-navigation button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.review-group {
+    padding: 15px;
+    margin-bottom: 15px;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+}
+
+.review-group h4 {
+    margin-top: 0;
+}
+
+.review-group p {
+    overflow-wrap: anywhere;
+    margin: 8px 0;
+}
+
+[hidden] {
+    display: none !important;
+}

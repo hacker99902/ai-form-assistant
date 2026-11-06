@@ -1,17 +1,56 @@
 
+// ==========================================
+// DOM ELEMENTS
+// ==========================================
+
 const pdfInput = document.getElementById("pdfInput");
 const uploadButton = document.getElementById("uploadButton");
 const statusText = document.getElementById("status");
+
 const reviewSection = document.getElementById("reviewSection");
 const fieldsContainer = document.getElementById("fieldsContainer");
 const reviewStatus = document.getElementById("reviewStatus");
+
 const saveChangesButton = document.getElementById("saveChangesButton");
 const saveProfileButton = document.getElementById("saveProfileButton");
+const proceedButton = document.getElementById("proceedButton");
+
+const formSection = document.getElementById("formSection");
+const fillFormButton = document.getElementById("fillFormButton");
+const submitFormButton = document.getElementById("submitFormButton");
+
+
+// ==========================================
+// APPLICATION STATE
+// ==========================================
 
 let currentExtractedDocumentId = null;
+let currentProfileId = null;
 let currentFields = {};
 
-// Convert extracted details into backend profile field names.
+
+// ==========================================
+// INITIAL UI SETUP
+// ==========================================
+
+// Old workflow buttons are no longer needed.
+if (saveChangesButton) {
+    saveChangesButton.hidden = true;
+}
+
+if (saveProfileButton) {
+    saveProfileButton.hidden = true;
+}
+
+proceedButton.hidden = true;
+reviewSection.hidden = true;
+formSection.hidden = true;
+
+
+// ==========================================
+// PROFILE FIELD MAPPING
+// ==========================================
+
 function getProfileFields(details) {
     const fields = {
         full_name: details.full_name,
@@ -36,6 +75,7 @@ function getProfileFields(details) {
     return fields;
 }
 
+
 function formatLabel(fieldName) {
     return fieldName
         .replace(/^address_/, "Address ")
@@ -43,14 +83,22 @@ function formatLabel(fieldName) {
         .replace(/\b\w/g, char => char.toUpperCase());
 }
 
+
+// ==========================================
+// DISPLAY EXTRACTED INFORMATION
+// ==========================================
+
 function renderFields(details) {
     fieldsContainer.replaceChildren();
 
     currentFields = getProfileFields(details);
 
-    for (const [fieldName, originalValue] of Object.entries(currentFields)) {
-
-        if (originalValue === null || originalValue === undefined || originalValue === "") {
+    for (const [fieldName, value] of Object.entries(currentFields)) {
+        if (
+            value === null ||
+            value === undefined ||
+            value === ""
+        ) {
             continue;
         }
 
@@ -62,51 +110,26 @@ function renderFields(details) {
 
         const input = document.createElement("input");
         input.type = "text";
-        input.value = String(originalValue);
-        input.dataset.fieldName = fieldName;
+        input.value = String(value);
+        input.readOnly = true;
 
         // Aadhaar is masked by the backend.
-        // Do not send a masked value as a correction.
+        // Never attempt to autofill the masked value.
         if (fieldName === "aadhaar_number") {
             input.readOnly = true;
         }
 
-        const fieldStatus = document.createElement("p");
-        fieldStatus.className = "field-status";
-        fieldStatus.textContent = "Needs review";
-
-        const verifyButton = document.createElement("button");
-        verifyButton.type = "button";
-        verifyButton.textContent = "Verify";
-
-        verifyButton.addEventListener("click", async () => {
-            try {
-                verifyButton.disabled = true;
-                fieldStatus.textContent = "Verifying...";
-
-                await verifyProfileField(
-                    currentExtractedDocumentId,
-                    fieldName
-                );
-
-                fieldStatus.textContent = "Verified";
-                fieldStatus.style.color = "green";
-                verifyButton.textContent = "Verified";
-
-            } catch (error) {
-                fieldStatus.textContent = error.message;
-                verifyButton.disabled = false;
-            }
-        });
-
-        field.append(label, input, fieldStatus, verifyButton);
+        field.append(label, input);
         fieldsContainer.appendChild(field);
     }
 }
 
-// Upload and process PDF.
-uploadButton.addEventListener("click", async () => {
 
+// ==========================================
+// UPLOAD AND PROCESS PDF
+// ==========================================
+
+uploadButton.addEventListener("click", async () => {
     const file = pdfInput.files[0];
 
     if (!file) {
@@ -128,17 +151,31 @@ uploadButton.addEventListener("click", async () => {
     }
 
     uploadButton.disabled = true;
+
     reviewSection.hidden = true;
+    formSection.hidden = true;
+    proceedButton.hidden = true;
+
     currentExtractedDocumentId = null;
+    currentProfileId = null;
+    currentFields = {};
 
     try {
+        // STEP 1: Create session
+
         statusText.textContent = "Creating session...";
 
         const sessionId = await createSession();
 
+
+        // STEP 2: Upload PDF
+
         statusText.textContent = "Uploading PDF...";
 
         const uploadData = await uploadPDF(sessionId, file);
+
+
+        // STEP 3: Classify documents
 
         statusText.textContent = "Classifying documents...";
 
@@ -146,18 +183,26 @@ uploadButton.addEventListener("click", async () => {
             uploadData.document_id
         );
 
+
+        // STEP 4: Find Aadhaar document
+
         const identityDocument = classificationData.documents.find(
-            doc => doc.document_type === "identity_document"
+            doc =>
+                doc.document_type === "identity_document" &&
+                doc.document_subtype === "aadhaar"
         );
 
         if (!identityDocument) {
             throw new Error(
-                "No identity document was detected. Marksheet and resume extraction will be added next."
+                "No Aadhaar document detected. Currently, this frontend workflow supports Aadhaar extraction."
             );
         }
 
         currentExtractedDocumentId =
             identityDocument.extracted_document_id;
+
+
+        // STEP 5: Extract Aadhaar details
 
         statusText.textContent = "Extracting Aadhaar information...";
 
@@ -165,14 +210,18 @@ uploadButton.addEventListener("click", async () => {
             currentExtractedDocumentId
         );
 
+
+        // STEP 6: Display extracted information
+
         renderFields(extractionData.details);
 
-        reviewStatus.textContent = "Needs review";
+        reviewStatus.textContent = "Extraction completed";
 
         reviewSection.hidden = false;
+        proceedButton.hidden = false;
 
         statusText.textContent =
-            "Extraction completed. Please review your information.";
+            "Documents processed successfully. Click Proceed to save your profile.";
 
     } catch (error) {
         console.error("Processing error:", error);
@@ -183,94 +232,443 @@ uploadButton.addEventListener("click", async () => {
     }
 });
 
-// Save user corrections.
-saveChangesButton.addEventListener("click", async () => {
 
-    if (!currentExtractedDocumentId) return;
+// ==========================================
+// PROCEED — SAVE DRAFT PROFILE
+// ==========================================
 
-    try {
-        saveChangesButton.disabled = true;
-
-        const updatedFields = {};
-
-        const inputs = fieldsContainer.querySelectorAll(
-            "input[data-field-name]"
-        );
-
-        for (const input of inputs) {
-            const fieldName = input.dataset.fieldName;
-
-            if (fieldName === "aadhaar_number") {
-                continue;
-            }
-
-            const newValue = input.value.trim();
-
-            if (newValue && newValue !== String(currentFields[fieldName])) {
-                updatedFields[fieldName] = newValue;
-            }
-        }
-
-        if (Object.keys(updatedFields).length === 0) {
-            statusText.textContent = "No corrections to save.";
-            return;
-        }
-
-        await updateProfileFields(
-            currentExtractedDocumentId,
-            updatedFields
-        );
-
-        Object.assign(currentFields, updatedFields);
-
-        // A corrected field must be verified again.
-        for (const field of fieldsContainer.querySelectorAll(".field")) {
-            const input = field.querySelector("input");
-            const fieldStatus = field.querySelector(".field-status");
-            const verifyButton = field.querySelector("button");
-
-            if (Object.hasOwn(updatedFields, input.dataset.fieldName)) {
-                fieldStatus.textContent = "Corrected — needs verification";
-                fieldStatus.style.color = "";
-                verifyButton.disabled = false;
-                verifyButton.textContent = "Verify";
-            }
-        }
-
-        statusText.textContent = "Corrections saved successfully.";
-
-    } catch (error) {
-        statusText.textContent = error.message;
-
-    } finally {
-        saveChangesButton.disabled = false;
+proceedButton.addEventListener("click", async () => {
+    if (!currentExtractedDocumentId) {
+        statusText.textContent = "Please upload and process a PDF first.";
+        return;
     }
-});
-
-// Save the profile after all fields are verified.
-saveProfileButton.addEventListener("click", async () => {
-
-    if (!currentExtractedDocumentId) return;
 
     try {
-        saveProfileButton.disabled = true;
-        statusText.textContent = "Saving verified profile...";
+        proceedButton.disabled = true;
 
-        const result = await saveVerifiedProfile(
+        statusText.textContent = "Saving your profile...";
+
+        // Save extracted information as a draft.
+        const result = await saveProfile(
             currentExtractedDocumentId
         );
 
-        reviewStatus.textContent = "Profile saved";
+        currentProfileId = result.profile_id;
+
+        if (!currentProfileId) {
+            throw new Error("Profile was saved but no profile ID was returned.");
+        }
+
+        reviewStatus.textContent = "Profile saved successfully";
+
+        // Open registration form.
+        reviewSection.hidden = true;
+        formSection.hidden = false;
 
         statusText.textContent =
-            "Verified profile saved successfully.";
+            "Your profile has been saved. Click Fill Form to populate the registration form.";
 
-        console.log("Profile saved:", result);
+        console.log("Saved profile ID:", currentProfileId);
 
     } catch (error) {
+        console.error("Profile saving error:", error);
         statusText.textContent = error.message;
 
     } finally {
-        saveProfileButton.disabled = false;
+        proceedButton.disabled = false;
     }
 });
+
+
+// ==========================================
+// FILL FORM FROM SAVED DATABASE PROFILE
+// ==========================================
+
+fillFormButton.addEventListener("click", async () => {
+    if (!currentProfileId) {
+        statusText.textContent =
+            "No saved profile found. Please process your PDF first.";
+        return;
+    }
+
+    try {
+        fillFormButton.disabled = true;
+
+        statusText.textContent = "Retrieving your saved profile...";
+
+        // Retrieve saved profile from PostgreSQL.
+        const savedProfile = await getSavedProfile(currentProfileId);
+
+        const profile = savedProfile.profile_data || {};
+
+        const formMapping = {
+            formName: profile.full_name,
+            formDOB: profile.date_of_birth,
+            formGender: profile.gender,
+            formAddress: profile.address,
+            formFather: profile.father_or_husband_name
+        };
+
+        let filledCount = 0;
+        let preservedCount = 0;
+        let skippedCount = 0;
+
+        for (const [elementId, value] of Object.entries(formMapping)) {
+            const input = document.getElementById(elementId);
+
+            if (!input) {
+                console.warn(`Form element not found: ${elementId}`);
+                continue;
+            }
+
+            // Attach manual-edit tracking only once.
+            if (input.dataset.editTrackingAttached !== "true") {
+                input.addEventListener("input", () => {
+                    const previousAutofill = input.dataset.autofilledValue;
+
+                    if (
+                        previousAutofill !== undefined &&
+                        input.value !== previousAutofill
+                    ) {
+                        input.dataset.manuallyEdited = "true";
+                    }
+                });
+
+                input.dataset.editTrackingAttached = "true";
+            }
+
+            // Skip missing profile values.
+            if (
+                value === null ||
+                value === undefined ||
+                String(value).trim() === ""
+            ) {
+                skippedCount++;
+                continue;
+            }
+
+            const newValue = String(value);
+            const currentValue = input.value.trim();
+
+            // Preserve fields manually edited by the user.
+            if (input.dataset.manuallyEdited === "true") {
+                preservedCount++;
+                continue;
+            }
+
+            // If a field contains a value that was not filled
+            // by our autofill, treat it as manually entered.
+            const previousAutofill = input.dataset.autofilledValue;
+
+            if (
+                currentValue !== "" &&
+                previousAutofill === undefined
+            ) {
+                input.dataset.manuallyEdited = "true";
+                preservedCount++;
+                continue;
+            }
+
+            // If the field was autofilled earlier but not edited,
+            // it can safely be refreshed from the saved profile.
+            input.value = newValue;
+            input.dataset.autofilledValue = newValue;
+
+            input.dispatchEvent(
+                new Event("change", { bubbles: true })
+            );
+
+            filledCount++;
+        }
+
+        statusText.textContent =
+            `${filledCount} fields filled/refreshed. ` +
+            `${preservedCount} manually edited fields preserved. ` +
+            `${skippedCount} fields skipped.`;
+
+    } catch (error) {
+        console.error("Form filling error:", error);
+        statusText.textContent = error.message;
+
+    } finally {
+        fillFormButton.disabled = false;
+    }
+});
+
+// ==========================================
+// MULTI-PAGE FORM NAVIGATION
+// ==========================================
+
+const formPages = document.querySelectorAll(".form-page");
+
+const previousPageButton =
+    document.getElementById("previousPageButton");
+
+const nextPageButton =
+    document.getElementById("nextPageButton");
+
+const finalSubmitButton =
+    document.getElementById("finalSubmitButton");
+
+const pageTitle = document.getElementById("pageTitle");
+const pageCounter = document.getElementById("pageCounter");
+const progressBar = document.getElementById("progressBar");
+
+const pageTitles = [
+    "Personal Information",
+    "Class 10 (SSLC) Information",
+    "Class 12 (PUC) Information",
+    "Engineering Information",
+    "Review & Submit"
+];
+
+let currentPage = 1;
+const totalPages = formPages.length;
+
+
+// Display selected page
+function showPage(pageNumber) {
+
+    currentPage = pageNumber;
+
+    formPages.forEach((page) => {
+
+        const pageNumberInForm = Number(page.dataset.page);
+
+        page.hidden = pageNumberInForm !== currentPage;
+
+        page.classList.toggle(
+            "active",
+            pageNumberInForm === currentPage
+        );
+
+    });
+
+    // Update heading
+    pageTitle.textContent = pageTitles[currentPage - 1];
+
+    pageCounter.textContent =
+        `Page ${currentPage} of ${totalPages}`;
+
+    // Update progress bar
+    progressBar.style.width =
+        `${(currentPage / totalPages) * 100}%`;
+
+    // Previous button
+    previousPageButton.disabled = currentPage === 1;
+
+    // Next and Submit buttons
+    nextPageButton.hidden = currentPage === totalPages;
+    finalSubmitButton.hidden = currentPage !== totalPages;
+
+    // Generate review on final page
+    if (currentPage === totalPages) {
+        generateFinalReview();
+    }
+
+    // Scroll to top of form
+    formSection.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+    });
+}
+
+
+// Next button
+nextPageButton.addEventListener("click", () => {
+
+    if (currentPage < totalPages) {
+        showPage(currentPage + 1);
+    }
+
+});
+
+
+// Previous button
+previousPageButton.addEventListener("click", () => {
+
+    if (currentPage > 1) {
+        showPage(currentPage - 1);
+    }
+
+});
+
+
+// ==========================================
+// FINAL REVIEW
+// ==========================================
+
+function generateFinalReview() {
+
+    const reviewContainer =
+        document.getElementById("finalReview");
+
+    reviewContainer.replaceChildren();
+
+    const reviewGroups = [
+        {
+            title: "Personal Information",
+            ids: [
+                "formName",
+                "formDOB",
+                "formGender",
+                "formAadhaar",
+                "formFather",
+                "formMother",
+                "formAddress",
+                "formMobile",
+                "formEmail"
+            ]
+        },
+        {
+            title: "Class 10 (SSLC)",
+            ids: [
+                "sslcBoard",
+                "sslcSchool",
+                "sslcRegNo",
+                "sslcRollNo",
+                "sslcYear",
+                "sslcEnglish",
+                "sslcLanguage",
+                "sslcMaths",
+                "sslcScience",
+                "sslcSocial",
+                "sslcTotal",
+                "sslcPercentage",
+                "sslcGrade",
+                "sslcResult"
+            ]
+        },
+        {
+            title: "Class 12 (PUC)",
+            ids: [
+                "pucBoard",
+                "pucCollege",
+                "pucRegNo",
+                "pucRollNo",
+                "pucYear",
+                "pucStream",
+                "pucEnglish",
+                "pucLanguage",
+                "pucSubject1",
+                "pucSubject2",
+                "pucSubject3",
+                "pucSubject4",
+                "pucTotal",
+                "pucPercentage",
+                "pucGrade",
+                "pucResult"
+            ]
+        },
+        {
+            title: "Engineering Information",
+            ids: [
+                "engUniversity",
+                "engCollege",
+                "engUSN",
+                "engBranch",
+                "engSemester",
+                "engAcademicYear",
+                "engCGPA",
+                "engBacklogs",
+                "sgpa1",
+                "sgpa2",
+                "sgpa3",
+                "sgpa4",
+                "sgpa5",
+                "sgpa6",
+                "sgpa7",
+                "sgpa8"
+            ]
+        }
+    ];
+
+    reviewGroups.forEach(group => {
+
+        const section = document.createElement("div");
+        section.className = "review-group";
+
+        const heading = document.createElement("h4");
+        heading.textContent = group.title;
+
+        section.appendChild(heading);
+
+        group.ids.forEach(id => {
+
+            const input = document.getElementById(id);
+
+            if (!input || !input.value.trim()) {
+                return;
+            }
+
+            const row = document.createElement("p");
+
+            const label = document.querySelector(
+                `label[for="${id}"]`
+            );
+
+            const fieldName = label
+                ? label.textContent
+                : id;
+
+            row.textContent =
+                `${fieldName}: ${input.value}`;
+
+            section.appendChild(row);
+
+        });
+
+        reviewContainer.appendChild(section);
+
+    });
+
+}
+
+
+// ==========================================
+// FINAL SUBMISSION
+// ==========================================
+
+finalSubmitButton.addEventListener("click", () => {
+
+    const confirmation =
+        document.getElementById("confirmInformation");
+
+    if (!confirmation.checked) {
+
+        statusText.textContent =
+            "Please confirm that your information is correct.";
+
+        return;
+    }
+
+    // This is currently a frontend demo.
+    // Actual database submission will be implemented separately.
+
+    statusText.textContent =
+        "Registration form completed successfully! Backend submission is not connected yet.";
+
+    console.log("Student registration form data:");
+
+    const formData = {};
+
+    document.querySelectorAll(
+        "#formSection input, #formSection select, #formSection textarea"
+    ).forEach(input => {
+
+        if (input.id) {
+            formData[input.id] =
+                input.type === "checkbox"
+                    ? input.checked
+                    : input.value;
+        }
+
+    });
+
+    console.log(formData);
+
+});
+
+
+// Start on page 1
+showPage(1);
