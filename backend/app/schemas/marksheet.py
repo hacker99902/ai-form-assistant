@@ -85,7 +85,7 @@ class SemesterDetails(BaseModel):
 
     semester_name: Optional[str] = None
 
-    examination_month: Optional[str] = None
+    examination_month: Optional[str | int] = None
 
     examination_year: Optional[int] = Field(
         default=None, ge=1900, le=2100

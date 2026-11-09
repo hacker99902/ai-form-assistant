@@ -5,7 +5,7 @@ from app.core.encryption import encrypt_value
 from uuid import UUID
 from app.services.address_quality_service import assess_address_quality
 from psycopg.types.json import Jsonb
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request
 from app.schemas.profile import UpdateProfileFieldsRequest
 import uuid
 from psycopg.types.json import Jsonb
@@ -19,6 +19,7 @@ from app.services.pdf_service import (
     extract_page_text,
     generate_page_preview,
 )
+from app.core.config import settings
 from app.services.marksheet_extraction import (
     extract_marksheet_details
 )
@@ -31,7 +32,7 @@ from app.services.resume_extraction import extract_resume_details
 import logging
 
 logger = logging.getLogger(__name__)
-
+from app.core.security import get_authenticated_user_id
 router = APIRouter()
 
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB
@@ -202,21 +203,34 @@ def find_source_page(value: str, pages: list[dict]) -> int | None:
     return None
 
 
-
 @router.post("/sessions")
-def create_session():
-    """Create a temporary processing session in Neon."""
+def create_session(request: Request):
+    """Create a processing session for the authenticated user."""
+
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Please log in first."
+        )
 
     try:
         pool = get_db_pool()
 
         with pool.connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute("""
-                    INSERT INTO processing_sessions (status)
-                    VALUES ('active')
+                cursor.execute(
+                    """
+                    INSERT INTO processing_sessions (
+                        status,
+                        user_id
+                    )
+                    VALUES ('active', %s)
                     RETURNING id, status, created_at, expires_at
-                """)
+                    """,
+                    (user_id,)
+                )
 
                 session = cursor.fetchone()
 
@@ -226,26 +240,33 @@ def create_session():
                 "id": str(session[0]),
                 "status": session[1],
                 "created_at": session[2],
-                "expires_at": session[3],
+                "expires_at": session[3]
             }
         }
 
-    except Exception as exc:
+    except Exception:
         logger.exception("Could not create processing session")
 
-    raise HTTPException(
-        status_code=500,
-        detail="Could not create processing session"
-    ) from exc
-
-
+        raise HTTPException(
+            status_code=500,
+            detail="Could not create processing session"
+        )
+    
 @router.post("/upload")
 async def upload_document(
+    request: Request,
     session_id: UUID,
     file: UploadFile = File(...)
 ):
     """Upload PDF, extract text and persist everything in Neon."""
+    user_id = get_authenticated_user_id(request)
 
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Please log in first."
+        )
+    
     pdf = None
 
     try:
@@ -338,14 +359,17 @@ async def upload_document(
         with pool.connection() as conn:
             with conn.cursor() as cursor:
 
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT id
                     FROM processing_sessions
                     WHERE id = %s
+                    AND user_id = %s
                     AND status = 'active'
                     AND expires_at > NOW()
-                """, (session_id,))
-
+                    """,
+                    (session_id, user_id)
+                )
                 session = cursor.fetchone()
 
                 if not session:
@@ -439,31 +463,50 @@ async def upload_document(
 
 
 @router.post("/{document_id}/classify")
-def classify_uploaded_document(document_id: UUID):
+
+def classify_uploaded_document(
+    document_id: UUID,
+    request: Request
+):
     """
     Classify an uploaded PDF using OpenRouter
     and save the classified document groups in Neon.
+    Only the owner of the document can classify it.
     """
+
+    # 1. Authenticate the user.
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Please log in first."
+        )
 
     try:
         pool = get_db_pool()
 
-        # 1. Retrieve and lock the existing extracted document.
         with pool.connection() as conn:
             with conn.cursor() as cursor:
 
+                # 2. Retrieve and lock the user's extracted document.
                 cursor.execute("""
                     SELECT
-                        id,
-                        document_type,
-                        extraction_status,
-                        extracted_text,
-                        extraction_metadata
-                    FROM extracted_documents
-                    WHERE document_id = %s
-                    ORDER BY created_at, id
-                    FOR UPDATE
-                """, (document_id,))
+                        ed.id,
+                        ed.document_type,
+                        ed.extraction_status,
+                        ed.extracted_text,
+                        ed.extraction_metadata
+                    FROM extracted_documents ed
+                    JOIN documents d
+                        ON d.id = ed.document_id
+                    JOIN processing_sessions ps
+                        ON ps.id = d.session_id
+                    WHERE ed.document_id = %s
+                      AND ps.user_id = %s
+                    ORDER BY ed.created_at, ed.id
+                    FOR UPDATE OF ed
+                """, (document_id, user_id))
 
                 records = cursor.fetchall()
 
@@ -473,8 +516,6 @@ def classify_uploaded_document(document_id: UUID):
                         detail="Extracted document not found"
                     )
 
-                # This endpoint currently expects one aggregate
-                # unclassified row created by the upload endpoint.
                 if len(records) != 1:
                     raise HTTPException(
                         status_code=409,
@@ -509,7 +550,7 @@ def classify_uploaded_document(document_id: UUID):
                         detail="No extracted text available"
                     )
 
-                # 2. Reconstruct individual page text.
+                # 3. Reconstruct individual page text.
                 metadata = extraction_metadata or {}
 
                 total_pages = metadata.get("total_pages", 0)
@@ -534,17 +575,18 @@ def classify_uploaded_document(document_id: UUID):
                         )
                     })
 
-                # 3. Run AI classification.
+                # 4. Run AI classification.
                 try:
                     classification = classify_documents(pages)
 
                 except Exception as exc:
+                    logger.exception("AI document classification failed")
                     raise HTTPException(
                         status_code=502,
-                        detail=f"AI classification failed: {str(exc)}"
+                        detail="AI classification failed"
                     ) from exc
 
-                # 4. Prepare database records.
+                # 5. Prepare classified database records.
                 classified_groups = classification.documents
 
                 if not classified_groups:
@@ -594,13 +636,14 @@ def classify_uploaded_document(document_id: UUID):
                         "extraction_metadata": group_metadata,
                     })
 
-                # 5. Update the original row and insert additional groups.
+                # 6. Update the original extracted document.
                 first_record = classified_records[0]
 
                 cursor.execute("""
                     UPDATE extracted_documents
                     SET
                         document_type = %s,
+                        document_subtype = %s,
                         start_page = %s,
                         end_page = %s,
                         extracted_text = %s,
@@ -608,6 +651,7 @@ def classify_uploaded_document(document_id: UUID):
                     WHERE id = %s
                 """, (
                     first_record["document_type"],
+                    first_record["document_subtype"],
                     first_record["start_page"],
                     first_record["end_page"],
                     first_record["extracted_text"],
@@ -615,6 +659,7 @@ def classify_uploaded_document(document_id: UUID):
                     first_record["id"]
                 ))
 
+                # 7. Insert additional classified documents.
                 for classified_record in classified_records[1:]:
 
                     cursor.execute("""
@@ -622,17 +667,19 @@ def classify_uploaded_document(document_id: UUID):
                             id,
                             document_id,
                             document_type,
+                            document_subtype,
                             start_page,
                             end_page,
                             extraction_status,
                             extracted_text,
                             extraction_metadata
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         classified_record["id"],
                         document_id,
                         classified_record["document_type"],
+                        classified_record["document_subtype"],
                         classified_record["start_page"],
                         classified_record["end_page"],
                         "completed",
@@ -640,7 +687,7 @@ def classify_uploaded_document(document_id: UUID):
                         Jsonb(classified_record["extraction_metadata"])
                     ))
 
-        # 6. Return classification summary.
+        # 8. Return classification summary.
         return {
             "message": "Document classification completed and saved successfully",
             "document_id": str(document_id),
@@ -672,20 +719,31 @@ def classify_uploaded_document(document_id: UUID):
             detail="Could not classify and save document"
         )
 
-
 @router.post("/extracted/{extracted_document_id}/extract-aadhaar")
 def extract_aadhaar_from_document(
-    extracted_document_id: UUID
+    extracted_document_id: UUID,
+    request: Request
 ):
-    """Extract Aadhaar details, assess address quality,
-    and save extracted fields and review suggestions in Neon.
     """
+    Extract Aadhaar details, assess address quality,
+    and save extracted fields and review suggestions in Neon.
+    Only the document owner can perform extraction.
+    """
+
+    # 1. Authenticate the user.
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Please log in first."
+        )
 
     try:
         pool = get_db_pool()
 
         # --------------------------------------------------
-        # 1. Retrieve the classified document
+        # 2. Retrieve the classified document and verify owner
         # --------------------------------------------------
 
         with pool.connection() as conn:
@@ -704,8 +762,11 @@ def extract_aadhaar_from_document(
                     FROM extracted_documents ed
                     JOIN documents d
                         ON d.id = ed.document_id
+                    JOIN processing_sessions ps
+                        ON ps.id = d.session_id
                     WHERE ed.id = %s
-                """, (extracted_document_id,))
+                      AND ps.user_id = %s
+                """, (extracted_document_id, user_id))
 
                 record = cursor.fetchone()
 
@@ -727,7 +788,7 @@ def extract_aadhaar_from_document(
         ) = record
 
         # --------------------------------------------------
-        # 2. Validate document type
+        # 3. Validate document type
         # --------------------------------------------------
 
         if document_type != "identity_document":
@@ -746,7 +807,7 @@ def extract_aadhaar_from_document(
             )
 
         # --------------------------------------------------
-        # 3. Reconstruct individual pages
+        # 4. Reconstruct individual pages
         # --------------------------------------------------
 
         stored_pages = split_extracted_text(extracted_text)
@@ -760,13 +821,13 @@ def extract_aadhaar_from_document(
             })
 
         # --------------------------------------------------
-        # 4. Run Aadhaar extraction
+        # 5. Run Aadhaar extraction
         # --------------------------------------------------
 
         details = extract_aadhaar_details(pages)
 
         # --------------------------------------------------
-        # 5. Prepare structured address components
+        # 6. Prepare structured address components
         # --------------------------------------------------
 
         components = details.address_components
@@ -782,7 +843,7 @@ def extract_aadhaar_from_document(
         }
 
         # --------------------------------------------------
-        # 6. Assess address quality
+        # 7. Assess address quality
         # --------------------------------------------------
 
         address_quality = assess_address_quality(
@@ -791,7 +852,7 @@ def extract_aadhaar_from_document(
         )
 
         # --------------------------------------------------
-        # 7. Prepare extracted fields
+        # 8. Prepare extracted fields
         # --------------------------------------------------
 
         field_values = {
@@ -805,7 +866,6 @@ def extract_aadhaar_from_document(
                 details.father_or_husband_name
             ),
 
-            # Structured address fields
             "address_house_number": components.house_number,
             "address_street": components.street,
             "address_locality": components.locality,
@@ -834,7 +894,7 @@ def extract_aadhaar_from_document(
         }
 
         # --------------------------------------------------
-        # 8. Save fields and quality report in one transaction
+        # 9. Save fields and quality report in one transaction
         # --------------------------------------------------
 
         saved_fields = []
@@ -842,15 +902,18 @@ def extract_aadhaar_from_document(
         with pool.connection() as conn:
             with conn.cursor() as cursor:
 
-                # Lock the extracted document to prevent
-                # concurrent duplicate extraction.
-
+                # Lock the extracted document and verify ownership again.
                 cursor.execute("""
-                    SELECT id
-                    FROM extracted_documents
-                    WHERE id = %s
-                    FOR UPDATE
-                """, (extracted_id,))
+                    SELECT ed.id
+                    FROM extracted_documents ed
+                    JOIN documents d
+                        ON d.id = ed.document_id
+                    JOIN processing_sessions ps
+                        ON ps.id = d.session_id
+                    WHERE ed.id = %s
+                      AND ps.user_id = %s
+                    FOR UPDATE OF ed
+                """, (extracted_id, user_id))
 
                 if not cursor.fetchone():
                     raise HTTPException(
@@ -942,7 +1005,6 @@ def extract_aadhaar_from_document(
                     saved_fields.append(field_name)
 
                 # Save address-quality assessment in JSONB.
-                # This does not overwrite extracted profile values.
 
                 cursor.execute("""
                     UPDATE extracted_documents
@@ -960,7 +1022,7 @@ def extract_aadhaar_from_document(
                 ))
 
         # --------------------------------------------------
-        # 9. Mask Aadhaar number for API response
+        # 10. Mask Aadhaar number for API response
         # --------------------------------------------------
 
         masked_aadhaar = None
@@ -972,7 +1034,7 @@ def extract_aadhaar_from_document(
             )
 
         # --------------------------------------------------
-        # 10. Return extraction and quality report
+        # 11. Return extraction and quality report
         # --------------------------------------------------
 
         return {
@@ -1019,12 +1081,26 @@ def extract_aadhaar_from_document(
             detail="Aadhaar extraction or database storage failed"
         )
 
+
 @router.get("/extracted/{extracted_document_id}/review")
-def get_document_for_review(extracted_document_id: UUID):
+def get_document_for_review(
+    extracted_document_id: UUID,
+    request: Request
+):
     """
     Retrieve extracted profile fields for user review.
     Aadhaar numbers are never returned in full.
+    Only the document owner can access the review.
     """
+
+    # 1. Authenticate the user.
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Please log in first."
+        )
 
     try:
         pool = get_db_pool()
@@ -1032,7 +1108,7 @@ def get_document_for_review(extracted_document_id: UUID):
         with pool.connection() as conn:
             with conn.cursor() as cursor:
 
-                # 1. Retrieve document information.
+                # 2. Retrieve document information and verify ownership.
                 cursor.execute("""
                     SELECT
                         ed.id,
@@ -1044,8 +1120,11 @@ def get_document_for_review(extracted_document_id: UUID):
                     FROM extracted_documents ed
                     JOIN documents d
                         ON d.id = ed.document_id
+                    JOIN processing_sessions ps
+                        ON ps.id = d.session_id
                     WHERE ed.id = %s
-                """, (extracted_document_id,))
+                      AND ps.user_id = %s
+                """, (extracted_document_id, user_id))
 
                 document = cursor.fetchone()
 
@@ -1064,7 +1143,7 @@ def get_document_for_review(extracted_document_id: UUID):
                     filename
                 ) = document
 
-                # 2. Retrieve extracted profile fields.
+                # 3. Retrieve extracted profile fields.
                 cursor.execute("""
                     SELECT
                         field_name,
@@ -1086,7 +1165,7 @@ def get_document_for_review(extracted_document_id: UUID):
                 detail="No extracted fields found for review"
             )
 
-        # 3. Prepare fields for the review interface.
+        # 4. Prepare fields for the review interface.
         fields = {}
 
         for row in rows:
@@ -1107,8 +1186,7 @@ def get_document_for_review(extracted_document_id: UUID):
                 else extracted_value
             )
 
-            # Aadhaar is encrypted in the database.
-            # Never expose its ciphertext or full number.
+            # Never expose Aadhaar ciphertext or full number.
             if field_name == "aadhaar_number":
                 value = "XXXX XXXX XXXX"
 
@@ -1120,7 +1198,7 @@ def get_document_for_review(extracted_document_id: UUID):
                 "source_page": source_page
             }
 
-        # 4. Retrieve address quality information.
+        # 5. Retrieve address quality information.
         metadata = extraction_metadata or {}
 
         address_quality = metadata.get(
@@ -1128,7 +1206,7 @@ def get_document_for_review(extracted_document_id: UUID):
             {}
         )
 
-        # 5. Return review information.
+        # 6. Return review information.
         return {
             "message": "Document review information retrieved",
             "extracted_document_id": str(extracted_id),
@@ -1156,16 +1234,25 @@ def get_document_for_review(extracted_document_id: UUID):
             detail="Could not retrieve document review information"
         )
 
-
+    
 @router.put("/extracted/{extracted_document_id}/fields")
 def update_extracted_fields(
     extracted_document_id: UUID,
-    request: UpdateProfileFieldsRequest
+    request: UpdateProfileFieldsRequest,
+    http_request: Request
 ):
     """
     Save user-corrected values without overwriting
     the original AI-extracted values.
     """
+
+    user_id = get_authenticated_user_id(http_request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated"
+        )
 
     try:
         pool = get_db_pool()
@@ -1174,13 +1261,24 @@ def update_extracted_fields(
         with pool.connection() as conn:
             with conn.cursor() as cursor:
 
-                # 1. Lock the document's existing profile fields.
+                # 1. Lock only fields belonging to this user.
                 cursor.execute("""
-                    SELECT field_name
-                    FROM profile_fields
-                    WHERE extracted_document_id = %s
-                    FOR UPDATE
-                """, (extracted_document_id,))
+                    SELECT pf.field_name
+                    FROM profile_fields pf
+                    JOIN extracted_documents ed
+                        ON ed.id = pf.extracted_document_id
+                    JOIN documents d
+                        ON d.id = ed.document_id
+                    JOIN processing_sessions ps
+                        ON ps.id = d.session_id
+                    WHERE
+                        pf.extracted_document_id = %s
+                        AND ps.user_id = %s
+                    FOR UPDATE OF pf
+                """, (
+                    extracted_document_id,
+                    user_id
+                ))
 
                 existing_fields = {
                     row[0] for row in cursor.fetchall()
@@ -1233,6 +1331,7 @@ def update_extracted_fields(
                         WHERE
                             extracted_document_id = %s
                             AND field_name = %s
+                        RETURNING id
                     """, (
                         corrected_value,
                         extracted_document_id,
@@ -1269,15 +1368,23 @@ def update_extracted_fields(
             detail="Could not update extracted profile fields"
         )
 
-
 @router.post(
     "/extracted/{extracted_document_id}/fields/{field_name}/verify"
 )
 def verify_profile_field(
     extracted_document_id: UUID,
-    field_name: str
+    field_name: str,
+    request: Request
 ):
     """Verify one extracted or corrected profile field."""
+
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated"
+        )
 
     try:
         from app.schemas.profile import ALLOWED_PROFILE_FIELDS
@@ -1294,20 +1401,29 @@ def verify_profile_field(
         with pool.connection() as conn:
             with conn.cursor() as cursor:
 
-                # 2. Retrieve and lock the field.
+                # 2. Retrieve and lock only this user's field.
                 cursor.execute("""
                     SELECT
-                        id,
-                        extracted_value,
-                        corrected_value,
-                        status
-                    FROM profile_fields
-                    WHERE extracted_document_id = %s
-                      AND field_name = %s
-                    FOR UPDATE
+                        pf.id,
+                        pf.extracted_value,
+                        pf.corrected_value,
+                        pf.status
+                    FROM profile_fields pf
+                    JOIN extracted_documents ed
+                        ON ed.id = pf.extracted_document_id
+                    JOIN documents d
+                        ON d.id = ed.document_id
+                    JOIN processing_sessions ps
+                        ON ps.id = d.session_id
+                    WHERE
+                        pf.extracted_document_id = %s
+                        AND pf.field_name = %s
+                        AND ps.user_id = %s
+                    FOR UPDATE OF pf
                 """, (
                     extracted_document_id,
-                    field_name
+                    field_name,
+                    user_id
                 ))
 
                 record = cursor.fetchone()
@@ -1408,140 +1524,198 @@ def verify_profile_field(
         )
 
 @router.post("/extracted/{extracted_document_id}/save-profile")
-def save_profile(extracted_document_id: UUID):
+def save_profile(
+    extracted_document_id: UUID,
+    request: Request
+):
     """
-    Save extracted profile information automatically.
-    Individual field verification is not required.
-    The profile is stored as a draft.
+    Save extracted profile information into the user's draft profile.
+    Merge new information without accidentally losing existing data.
     """
+
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated"
+        )
 
     pool = get_db_pool()
 
     try:
         with pool.connection() as conn:
-            with conn.cursor() as cursor:
+            with conn.transaction():
+                with conn.cursor() as cursor:
 
-                # 1. Get the session associated with the document.
-                cursor.execute("""
-                    SELECT d.session_id
-                    FROM extracted_documents ed
-                    JOIN documents d ON d.id = ed.document_id
-                    WHERE ed.id = %s
-                    FOR UPDATE OF ed, d
-                """, (extracted_document_id,))
-
-                document = cursor.fetchone()
-
-                if not document:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="Extracted document not found"
-                    )
-
-                session_id = document[0]
-
-                # 2. Retrieve extracted fields and corrections.
-                cursor.execute("""
-                    SELECT
-                        field_name,
-                        extracted_value,
-                        corrected_value
-                    FROM profile_fields
-                    WHERE extracted_document_id = %s
-                    ORDER BY field_name
-                    FOR UPDATE
-                """, (extracted_document_id,))
-
-                rows = cursor.fetchall()
-
-                if not rows:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="No profile fields found"
-                    )
-
-                # 3. Build profile using the latest available values.
-                profile_data = {}
-
-                for field_name, extracted_value, corrected_value in rows:
-
-                    value = (
-                        corrected_value
-                        if corrected_value is not None
-                        else extracted_value
-                    )
-
-                    # Skip missing or empty fields.
-                    if value is None or not str(value).strip():
-                        continue
-
-                    # Aadhaar must remain encrypted.
-                    if field_name == "aadhaar_number":
-                        if not str(value).startswith("fernet:v1:"):
-                            raise HTTPException(
-                                status_code=500,
-                                detail="Aadhaar encryption validation failed"
-                            )
-
-                    profile_data[field_name] = value
-
-                if not profile_data:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="No usable profile information found"
-                    )
-
-                # 4. Check for an existing profile in this session.
-                cursor.execute("""
-                    SELECT id, status
-                    FROM verified_profiles
-                    WHERE session_id = %s
-                    FOR UPDATE
-                """, (session_id,))
-
-                existing_profile = cursor.fetchone()
-
-                if existing_profile:
-
-                    profile_id, current_status = existing_profile
-
-                    if current_status != "draft":
-                        raise HTTPException(
-                            status_code=409,
-                            detail="An approved profile cannot be overwritten"
-                        )
-
-                    # Update existing draft instead of creating duplicates.
+                    # 1. Verify document ownership and retrieve session.
                     cursor.execute("""
-                        UPDATE verified_profiles
-                        SET profile_data = %s
-                        WHERE id = %s
-                        RETURNING id, status, created_at
+                        SELECT d.session_id
+                        FROM extracted_documents ed
+                        JOIN documents d
+                            ON d.id = ed.document_id
+                        JOIN processing_sessions ps
+                            ON ps.id = d.session_id
+                        WHERE ed.id = %s
+                          AND ps.user_id = %s
+                        FOR UPDATE OF ed, d
                     """, (
-                        Jsonb(profile_data),
-                        profile_id
+                        extracted_document_id,
+                        user_id
                     ))
 
-                else:
+                    document = cursor.fetchone()
 
-                    # 5. Create a new draft profile.
+                    if not document:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="Extracted document not found"
+                        )
+
+                    session_id = document[0]
+
+                    # 2. Retrieve extracted fields and corrections.
                     cursor.execute("""
-                        INSERT INTO verified_profiles (
+                        SELECT
+                            field_name,
+                            extracted_value,
+                            corrected_value
+                        FROM profile_fields
+                        WHERE extracted_document_id = %s
+                        ORDER BY field_name
+                        FOR UPDATE
+                    """, (extracted_document_id,))
+
+                    rows = cursor.fetchall()
+
+                    if not rows:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="No profile fields found"
+                        )
+
+                    # 3. Build incoming profile information.
+                    profile_data = {}
+
+                    corrected_fields = set()
+
+                    for field_name, extracted_value, corrected_value in rows:
+
+                        value = (
+                            corrected_value
+                            if corrected_value is not None
+                            else extracted_value
+                        )
+
+                        if value is None or not str(value).strip():
+                            continue
+
+                        # Aadhaar must remain encrypted.
+                        if field_name == "aadhaar_number":
+                            if not str(value).startswith("fernet:v1:"):
+                                raise HTTPException(
+                                    status_code=500,
+                                    detail="Aadhaar encryption validation failed"
+                                )
+
+                        profile_data[field_name] = value
+
+                        # Explicit user corrections can update existing values.
+                        if corrected_value is not None:
+                            corrected_fields.add(field_name)
+
+                    if not profile_data:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="No usable profile information found"
+                        )
+
+                    # 4. Find the user's latest draft across all sessions.
+                    cursor.execute("""
+                        SELECT
                             id,
                             session_id,
-                            profile_data,
-                            status,
-                            approved_at
-                        )
-                        VALUES (%s, %s, %s, 'draft', NULL)
-                        RETURNING id, status, created_at
-                    """, (
-                        uuid.uuid4(),
-                        session_id,
-                        Jsonb(profile_data)
-                    ))
+                            profile_data
+                        FROM verified_profiles
+                        WHERE user_id = %s
+                          AND status = 'draft'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        FOR UPDATE
+                    """, (user_id,))
 
-                saved_profile = cursor.fetchone()
+                    existing_profile = cursor.fetchone()
+
+                    if existing_profile:
+
+                        profile_id, existing_session_id, existing_data = (
+                            existing_profile
+                        )
+
+                        # Preserve existing profile information.
+                        merged_profile_data = dict(existing_data or {})
+
+                        for field_name, value in profile_data.items():
+
+                            existing_value = merged_profile_data.get(
+                                field_name
+                            )
+
+                            # Fill missing fields or apply explicit corrections.
+                            if (
+                                existing_value is None
+                                or not str(existing_value).strip()
+                                or field_name in corrected_fields
+                            ):
+                                merged_profile_data[field_name] = value
+
+                        # Update only the user's draft.
+                        cursor.execute("""
+                            UPDATE verified_profiles
+                            SET profile_data = %s
+                            WHERE id = %s
+                              AND user_id = %s
+                              AND status = 'draft'
+                            RETURNING id, status, created_at
+                        """, (
+                            Jsonb(merged_profile_data),
+                            profile_id,
+                            user_id
+                        ))
+
+                        saved_profile = cursor.fetchone()
+
+                        if not saved_profile:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="Draft profile could not be updated"
+                            )
+
+                        session_id = existing_session_id
+                        profile_data = merged_profile_data
+
+                    else:
+
+                        # 5. Create a new draft if none exists.
+                        cursor.execute("""
+                            INSERT INTO verified_profiles (
+                                id,
+                                session_id,
+                                user_id,
+                                profile_data,
+                                status,
+                                approved_at
+                            )
+                            VALUES (%s, %s, %s, %s, 'draft', NULL)
+                            RETURNING id, status, created_at
+                        """, (
+                            uuid.uuid4(),
+                            session_id,
+                            user_id,
+                            Jsonb(profile_data)
+                        ))
+
+                        saved_profile = cursor.fetchone()
 
         return {
             "message": "Profile saved successfully",
@@ -1564,7 +1738,17 @@ def save_profile(extracted_document_id: UUID):
         )
 
 @router.get("/profiles/{profile_id}")
-def get_saved_profile(profile_id: UUID):
+def get_saved_profile(
+    profile_id: UUID,
+    request: Request
+):
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated"
+        )
 
     pool = get_db_pool()
 
@@ -1572,9 +1756,8 @@ def get_saved_profile(profile_id: UUID):
         with pool.connection() as conn:
             with conn.cursor() as cursor:
 
-                # 1. Retrieve the saved profile
-                cursor.execute(
-                    """
+                # 1. Retrieve only this user's saved profile.
+                cursor.execute("""
                     SELECT
                         id,
                         session_id,
@@ -1583,10 +1766,13 @@ def get_saved_profile(profile_id: UUID):
                         approved_at,
                         created_at
                     FROM verified_profiles
-                    WHERE id = %s
-                    """,
-                    (profile_id,)
-                )
+                    WHERE
+                        id = %s
+                        AND user_id = %s
+                """, (
+                    profile_id,
+                    user_id
+                ))
 
                 profile = cursor.fetchone()
 
@@ -1596,7 +1782,7 @@ def get_saved_profile(profile_id: UUID):
                         detail="Profile not found"
                     )
 
-        # 2. Unpack the database result
+        # 2. Unpack database result.
         (
             saved_profile_id,
             session_id,
@@ -1606,10 +1792,10 @@ def get_saved_profile(profile_id: UUID):
             created_at
         ) = profile
 
-        # 3. Convert JSONB into a Python dictionary
+        # 3. Convert JSONB into a Python dictionary.
         profile_data = dict(profile_data)
 
-        # 4. Decrypt Aadhaar internally and mask it
+        # 4. Decrypt Aadhaar internally and mask it.
         if profile_data.get("aadhaar_number"):
 
             encrypted_value = profile_data["aadhaar_number"]
@@ -1641,7 +1827,7 @@ def get_saved_profile(profile_id: UUID):
                 else "XXXX XXXX XXXX"
             )
 
-        # 5. Return the profile safely
+        # 5. Return the profile safely.
         return {
             "message": "Profile retrieved successfully",
             "profile_id": str(saved_profile_id),
@@ -1665,11 +1851,22 @@ def get_saved_profile(profile_id: UUID):
             status_code=500,
             detail="An error occurred while retrieving the profile"
         )
+    
 @router.get("/profiles/{profile_id}/aadhaar")
-def get_full_aadhaar(profile_id: UUID, request: Request):
+def get_full_aadhaar(
+    profile_id: UUID,
+    request: Request
+):
+    user_id = get_authenticated_user_id(request)
 
-    # Allow only explicitly enabled local testing
-    if os.getenv("ENABLE_LOCAL_AADHAAR_FILL") != "true":
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated"
+        )
+
+    # Allow only explicitly enabled local testing.
+    if not settings.ENABLE_LOCAL_AADHAAR_FILL:
         raise HTTPException(
             status_code=403,
             detail="Full Aadhaar retrieval is disabled"
@@ -1689,14 +1886,16 @@ def get_full_aadhaar(profile_id: UUID, request: Request):
     try:
         with pool.connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(
-                    """
+                cursor.execute("""
                     SELECT profile_data
                     FROM verified_profiles
-                    WHERE id = %s
-                    """,
-                    (profile_id,)
-                )
+                    WHERE
+                        id = %s
+                        AND user_id = %s
+                """, (
+                    profile_id,
+                    user_id
+                ))
 
                 result = cursor.fetchone()
 
@@ -1744,68 +1943,129 @@ def get_full_aadhaar(profile_id: UUID, request: Request):
 
     except Exception:
         logger.exception("Failed to retrieve Aadhaar")
+
         raise HTTPException(
             status_code=500,
             detail="Could not retrieve Aadhaar information"
         )
 
-@router.post("/profiles/{profile_id}/approve")
-def approve_saved_profile(profile_id: UUID):
 
+@router.post("/profiles/{profile_id}/approve")
+def approve_saved_profile(
+    profile_id: UUID,
+    request: Request
+):
+    user_id = get_authenticated_user_id(request)
     pool = get_db_pool()
 
     try:
         with pool.connection() as conn:
-            with conn.cursor() as cursor:
+            with conn.transaction():
+                with conn.cursor() as cursor:
 
-                # 1. Find and lock the profile
-                cursor.execute(
-                    """
-                    SELECT id, status
-                    FROM verified_profiles
-                    WHERE id = %s
-                    FOR UPDATE
-                    """,
-                    (profile_id,)
-                )
+                    # 1. Lock this user's draft profile.
+                    cursor.execute("""
+                        SELECT id, status, profile_data
+                        FROM verified_profiles
+                        WHERE id = %s
+                          AND user_id = %s
+                        FOR UPDATE
+                    """, (profile_id, user_id))
 
-                profile = cursor.fetchone()
+                    profile = cursor.fetchone()
 
-                if not profile:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="Profile not found"
-                    )
+                    if not profile:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="Profile not found"
+                        )
 
-                saved_profile_id, current_status = profile
+                    saved_profile_id, current_status, profile_data = profile
 
-                # 2. Prevent duplicate approval
-                if current_status == "approved":
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Profile has already been approved"
-                    )
+                    if current_status == "approved":
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Profile has already been approved"
+                        )
 
-                if current_status != "draft":
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Only draft profiles can be approved"
-                    )
+                    if current_status != "draft":
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Only draft profiles can be approved"
+                        )
 
-                # 3. Approve the profile
-                cursor.execute(
-                    """
-                    UPDATE verified_profiles
-                    SET
-                        status = 'approved',
-                        approved_at = NOW()
-                    WHERE id = %s
-                    RETURNING id, status, approved_at
-                    """,
-                    (profile_id,)
-                )
+                    profile_data = profile_data or {}
 
-                approved_profile = cursor.fetchone()
+                    # 2. Require a verified full name.
+                    if not str(profile_data.get("full_name", "")).strip():
+                        raise HTTPException(
+                            status_code=400,
+                            detail="A verified full name is required"
+                        )
+
+                    # 3. Check every stored identity field.
+                    from app.schemas.profile import ALLOWED_PROFILE_FIELDS
+
+                    for field_name in ALLOWED_PROFILE_FIELDS:
+
+                        stored_value = profile_data.get(field_name)
+
+                        if stored_value is None or not str(stored_value).strip():
+                            continue
+
+                        cursor.execute("""
+                            SELECT EXISTS (
+                                SELECT 1
+                                FROM profile_fields pf
+                                JOIN extracted_documents ed
+                                    ON ed.id = pf.extracted_document_id
+                                JOIN documents d
+                                    ON d.id = ed.document_id
+                                JOIN processing_sessions ps
+                                    ON ps.id = d.session_id
+                                WHERE ps.user_id = %s
+                                  AND pf.field_name = %s
+                                  AND COALESCE(
+                                      pf.corrected_value,
+                                      pf.extracted_value
+                                  ) = %s
+                                  AND pf.status = 'verified'
+                            )
+                        """, (
+                            user_id,
+                            field_name,
+                            stored_value
+                        ))
+
+                        is_verified = cursor.fetchone()[0]
+
+                        if not is_verified:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    f"Field '{field_name}' must be "
+                                    "reviewed and verified before approval"
+                                )
+                            )
+
+                    # 4. Approve only after all checks pass.
+                    cursor.execute("""
+                        UPDATE verified_profiles
+                        SET
+                            status = 'approved',
+                            approved_at = NOW()
+                        WHERE id = %s
+                          AND user_id = %s
+                        RETURNING id, status, approved_at
+                    """, (profile_id, user_id))
+
+                    approved_profile = cursor.fetchone()
+
+                    if not approved_profile:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="Profile not found"
+                        )
 
         return {
             "message": "Profile approved successfully",
@@ -1825,31 +2085,121 @@ def approve_saved_profile(profile_id: UUID):
             detail="An error occurred while approving the profile"
         )
 
+
+def calculate_marksheet_totals(data: dict) -> dict:
+    """
+    Calculate marksheet totals from extracted subject marks.
+    Do not assume maximum marks when the source does not provide them.
+    """
+
+    semesters = data.get("semesters") or []
+
+    overall_obtained = 0
+    overall_maximum = 0
+    all_obtained_available = True
+    all_maximum_available = True
+
+    for semester in semesters:
+        subjects = semester.get("subjects") or []
+
+        semester_obtained = 0
+        semester_maximum = 0
+
+        semester_obtained_available = True
+        semester_maximum_available = True
+
+        for subject in subjects:
+            obtained = subject.get("marks_obtained")
+            maximum = subject.get("maximum_marks")
+
+            if obtained is not None:
+                semester_obtained += float(obtained)
+            else:
+                semester_obtained_available = False
+
+            if maximum is not None:
+                semester_maximum += float(maximum)
+            else:
+                semester_maximum_available = False
+
+        semester["total_marks_obtained"] = (
+            semester_obtained
+            if semester_obtained_available else None
+        )
+
+        semester["maximum_marks"] = (
+            semester_maximum
+            if semester_maximum_available else None
+        )
+
+        if semester_obtained_available:
+            overall_obtained += semester_obtained
+        else:
+            all_obtained_available = False
+
+        if semester_maximum_available:
+            overall_maximum += semester_maximum
+        else:
+            all_maximum_available = False
+
+    data["total_marks_obtained"] = (
+        overall_obtained if all_obtained_available else None
+    )
+
+    data["maximum_marks"] = (
+        overall_maximum if all_maximum_available else None
+    )
+
+    if all_obtained_available and all_maximum_available and overall_maximum > 0:
+        data["percentage"] = round(
+            (overall_obtained / overall_maximum) * 100, 2
+        )
+    else:
+        data["percentage"] = None
+
+    return data
+
+
+ 
 @router.post("/extracted/{extracted_document_id}/extract-marksheet")
 def extract_marksheet_from_document(
-    extracted_document_id: UUID
+    extracted_document_id: UUID,
+    request: Request
 ):
     """
     Extract marksheet or transcript information,
     validate it and store structured data in Neon JSONB.
     """
 
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required"
+        )
+
     try:
         pool = get_db_pool()
 
-        # 1. Retrieve the classified document.
+        # 1. Retrieve the classified document and verify ownership.
         with pool.connection() as conn:
             with conn.cursor() as cursor:
 
                 cursor.execute("""
                     SELECT
-                        id,
-                        document_type,
-                        extraction_status,
-                        extracted_text
-                    FROM extracted_documents
-                    WHERE id = %s
-                """, (extracted_document_id,))
+                        ed.id,
+                        ed.document_type,
+                        ed.extraction_status,
+                        ed.extracted_text
+                    FROM extracted_documents ed
+                    JOIN documents d
+                        ON d.id = ed.document_id
+                    JOIN processing_sessions ps
+                        ON ps.id = d.session_id
+                    WHERE ed.id = %s
+                      AND ps.user_id = %s
+                """, (extracted_document_id, user_id))
 
                 record = cursor.fetchone()
 
@@ -1893,12 +2243,23 @@ def extract_marksheet_from_document(
             with conn.cursor() as cursor:
 
                 cursor.execute("""
-                    SELECT extraction_metadata
-                    FROM extracted_documents
-                    WHERE id = %s
-                """, (extracted_id,))
+                    SELECT ed.extraction_metadata
+                    FROM extracted_documents ed
+                    JOIN documents d
+                        ON d.id = ed.document_id
+                    JOIN processing_sessions ps
+                        ON ps.id = d.session_id
+                    WHERE ed.id = %s
+                      AND ps.user_id = %s
+                """, (extracted_id, user_id))
 
                 metadata_row = cursor.fetchone()
+
+        if not metadata_row:
+            raise HTTPException(
+                status_code=404,
+                detail="Extracted document not found"
+            )
 
         metadata = metadata_row[0] or {}
 
@@ -1916,57 +2277,62 @@ def extract_marksheet_from_document(
 
         # 5. Convert Pydantic model into JSON-compatible data.
         marksheet_data = details.model_dump(mode="json")
+        marksheet_data = calculate_marksheet_totals(marksheet_data)
 
         # 6. Save structured data in Neon JSONB.
         with pool.connection() as conn:
-            with conn.cursor() as cursor:
+            with conn.transaction():
+                with conn.cursor() as cursor:
 
-                # Lock the row before saving to prevent
-                # concurrent duplicate extraction.
+                    # Lock the row and recheck ownership before saving.
+                    cursor.execute("""
+                        SELECT ed.extraction_metadata
+                        FROM extracted_documents ed
+                        JOIN documents d
+                            ON d.id = ed.document_id
+                        JOIN processing_sessions ps
+                            ON ps.id = d.session_id
+                        WHERE ed.id = %s
+                          AND ps.user_id = %s
+                        FOR UPDATE OF ed
+                    """, (extracted_id, user_id))
 
-                cursor.execute("""
-                    SELECT extraction_metadata
-                    FROM extracted_documents
-                    WHERE id = %s
-                    FOR UPDATE
-                """, (extracted_id,))
+                    locked_row = cursor.fetchone()
 
-                locked_row = cursor.fetchone()
-
-                if not locked_row:
-                    raise HTTPException(
-                        status_code=404,
-                        detail="Extracted document no longer exists"
-                    )
-
-                current_metadata = locked_row[0] or {}
-
-                if current_metadata.get("marksheet_extraction"):
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            "Marksheet extraction was already "
-                            "saved by another request"
+                    if not locked_row:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="Extracted document not found"
                         )
-                    )
 
-                extraction_metadata = {
-                    "marksheet_extraction": marksheet_data,
-                    "marksheet_verification_status": "needs_review"
-                }
+                    current_metadata = locked_row[0] or {}
 
-                cursor.execute("""
-                    UPDATE extracted_documents
-                    SET extraction_metadata =
-                        COALESCE(
-                            extraction_metadata,
-                            '{}'::jsonb
-                        ) || %s
-                    WHERE id = %s
-                """, (
-                    Jsonb(extraction_metadata),
-                    extracted_id
-                ))
+                    if current_metadata.get("marksheet_extraction"):
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                "Marksheet extraction was already "
+                                "saved by another request"
+                            )
+                        )
+
+                    extraction_metadata = {
+                        "marksheet_extraction": marksheet_data,
+                        "marksheet_verification_status": "needs_review"
+                    }
+
+                    cursor.execute("""
+                        UPDATE extracted_documents
+                        SET extraction_metadata =
+                            COALESCE(
+                                extraction_metadata,
+                                '{}'::jsonb
+                            ) || %s
+                        WHERE id = %s
+                    """, (
+                        Jsonb(extraction_metadata),
+                        extracted_id
+                    ))
 
         logger.info(
             "Marksheet extraction completed for document %s",
@@ -2001,20 +2367,26 @@ def extract_marksheet_from_document(
         )
 
 @router.get("/extracted/{extracted_document_id}/review-marksheet")
-def get_marksheet_for_review(extracted_document_id: UUID):
-    """
-    Retrieve structured marksheet/transcript information
-    for user review.
-    """
+def get_marksheet_for_review(
+    extracted_document_id: UUID,
+    request: Request
+):
+    """Retrieve the latest marksheet data for user review."""
+
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated"
+        )
 
     try:
         pool = get_db_pool()
 
         with pool.connection() as conn:
             with conn.cursor() as cursor:
-
-                cursor.execute(
-                    """
+                cursor.execute("""
                     SELECT
                         ed.id,
                         ed.document_type,
@@ -2025,10 +2397,14 @@ def get_marksheet_for_review(extracted_document_id: UUID):
                     FROM extracted_documents ed
                     JOIN documents d
                         ON d.id = ed.document_id
+                    JOIN processing_sessions ps
+                        ON ps.id = d.session_id
                     WHERE ed.id = %s
-                    """,
-                    (extracted_document_id,)
-                )
+                      AND ps.user_id = %s
+                """, (
+                    extracted_document_id,
+                    user_id
+                ))
 
                 record = cursor.fetchone()
 
@@ -2047,23 +2423,29 @@ def get_marksheet_for_review(extracted_document_id: UUID):
             filename
         ) = record
 
-        # Validate document type
         if document_type not in ("marksheet", "transcript"):
             raise HTTPException(
                 status_code=400,
                 detail="Document is not a marksheet or transcript"
             )
 
-        # Retrieve structured extraction
         metadata = extraction_metadata or {}
 
-        marksheet_data = metadata.get("marksheet_extraction")
+        # Prefer corrected data over original extraction.
+        marksheet_data = (
+            metadata.get("marksheet_corrected")
+            or metadata.get("marksheet_extraction")
+        )
 
         if not marksheet_data:
             raise HTTPException(
                 status_code=404,
                 detail="Marksheet information has not been extracted"
             )
+
+        marksheet_data = calculate_marksheet_totals(
+            marksheet_data
+        )
 
         verification_status = metadata.get(
             "marksheet_verification_status",
@@ -2095,19 +2477,29 @@ def get_marksheet_for_review(extracted_document_id: UUID):
             status_code=500,
             detail="Could not retrieve marksheet review information"
         )
+
+
 @router.put("/extracted/{extracted_document_id}/update-marksheet")
 def update_marksheet(
     extracted_document_id: UUID,
-    request: MarksheetCorrectionRequest
+    request: MarksheetCorrectionRequest,
+    http_request: Request
 ):
     """Save validated user corrections and recalculate marksheet totals."""
 
     import copy
 
+    user_id = get_authenticated_user_id(http_request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated"
+        )
+
     try:
         pool = get_db_pool()
 
-        # 1. Validate request values
         request_data = request.model_dump(exclude_unset=True)
         reject_placeholder_values(request_data)
 
@@ -2115,16 +2507,24 @@ def update_marksheet(
             with conn.transaction():
                 with conn.cursor() as cursor:
 
-                    # 2. Lock and retrieve document
-                    cursor.execute(
-                        """
-                        SELECT document_type, extraction_metadata
-                        FROM extracted_documents
-                        WHERE id = %s
-                        FOR UPDATE
-                        """,
-                        (extracted_document_id,)
-                    )
+                    # Lock document only if it belongs to this user.
+                    cursor.execute("""
+                        SELECT
+                            ed.document_type,
+                            ed.extraction_metadata
+                        FROM extracted_documents ed
+                        JOIN documents d
+                            ON d.id = ed.document_id
+                        JOIN processing_sessions ps
+                            ON ps.id = d.session_id
+                        WHERE
+                            ed.id = %s
+                            AND ps.user_id = %s
+                        FOR UPDATE OF ed
+                    """, (
+                        extracted_document_id,
+                        user_id
+                    ))
 
                     record = cursor.fetchone()
 
@@ -2151,12 +2551,12 @@ def update_marksheet(
                             detail="Original marksheet extraction not found"
                         )
 
-                    # 3. Start from original data or previous corrections
+                    # Start from original data or previous corrections.
                     corrected_data = copy.deepcopy(
                         metadata.get("marksheet_corrected", original_data)
                     )
 
-                    # 4. Update student fields
+                    # Update student fields.
                     if request.student is not None:
                         student_updates = request.student.model_dump(
                             exclude_unset=True
@@ -2165,7 +2565,7 @@ def update_marksheet(
                         corrected_data.setdefault("student", {})
                         corrected_data["student"].update(student_updates)
 
-                    # 5. Update individual subjects
+                    # Update individual subjects.
                     for correction in request.subject_corrections:
 
                         semester_index = correction.semester_index
@@ -2198,7 +2598,6 @@ def update_marksheet(
 
                         current_subject = subjects[subject_index]
 
-                        # Determine effective marks after correction
                         effective_marks = updates.get(
                             "marks_obtained",
                             current_subject.get("marks_obtained")
@@ -2222,7 +2621,6 @@ def update_marksheet(
                                 )
                             )
 
-                        # Validate internal + external marks
                         internal = updates.get(
                             "internal_marks",
                             current_subject.get("internal_marks")
@@ -2249,7 +2647,7 @@ def update_marksheet(
 
                         current_subject.update(updates)
 
-                    # 6. Update manually supplied summary fields
+                    # Update manually supplied summary fields.
                     summary_fields = [
                         "total_marks_obtained",
                         "maximum_marks",
@@ -2263,7 +2661,7 @@ def update_marksheet(
                         if field in request_data:
                             corrected_data[field] = request_data[field]
 
-                    # 7. Recalculate semester totals
+                    # Recalculate semester totals.
                     semesters = corrected_data.get("semesters", [])
 
                     for semester in semesters:
@@ -2293,7 +2691,7 @@ def update_marksheet(
                                 subject_maximums
                             )
 
-                    # 8. Recalculate overall totals
+                    # Recalculate overall totals.
                     if semesters and all(
                         semester.get("total_marks_obtained") is not None
                         for semester in semesters
@@ -2312,7 +2710,7 @@ def update_marksheet(
                             for semester in semesters
                         )
 
-                    # 9. Recalculate percentage
+                    # Recalculate percentage.
                     total = corrected_data.get("total_marks_obtained")
                     maximum = corrected_data.get("maximum_marks")
 
@@ -2332,21 +2730,18 @@ def update_marksheet(
                             2
                         )
 
-                    # 10. Save corrected copy separately
+                    # Save corrected copy separately.
                     metadata["marksheet_corrected"] = corrected_data
                     metadata["marksheet_verification_status"] = "needs_review"
 
-                    cursor.execute(
-                        """
+                    cursor.execute("""
                         UPDATE extracted_documents
                         SET extraction_metadata = %s
                         WHERE id = %s
-                        """,
-                        (
-                            Jsonb(metadata),
-                            extracted_document_id
-                        )
-                    )
+                    """, (
+                        Jsonb(metadata),
+                        extracted_document_id
+                    ))
 
         return {
             "message": "Marksheet corrections saved successfully",
@@ -2366,13 +2761,22 @@ def update_marksheet(
             detail="Could not update marksheet information"
         )
 
-
-
 @router.post("/extracted/{extracted_document_id}/verify-marksheet")
-def verify_marksheet(extracted_document_id: UUID):
-    """Verify a marksheet after explicit user confirmation."""
+def verify_marksheet(
+    extracted_document_id: UUID,
+    request: Request
+):
+    """Verify a marksheet and merge its academic information into the user's draft profile."""
 
     from datetime import datetime, timezone
+
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required"
+        )
 
     try:
         pool = get_db_pool()
@@ -2381,16 +2785,24 @@ def verify_marksheet(extracted_document_id: UUID):
             with conn.transaction():
                 with conn.cursor() as cursor:
 
-                    # 1. Retrieve and lock the document
-                    cursor.execute(
-                        """
-                        SELECT document_type, extraction_metadata
-                        FROM extracted_documents
-                        WHERE id = %s
-                        FOR UPDATE
-                        """,
-                        (extracted_document_id,)
-                    )
+                    # 1. Retrieve and lock the user's document.
+                    cursor.execute("""
+                        SELECT
+                            ed.document_type,
+                            ed.extraction_metadata,
+                            d.session_id
+                        FROM extracted_documents ed
+                        JOIN documents d
+                            ON d.id = ed.document_id
+                        JOIN processing_sessions ps
+                            ON ps.id = d.session_id
+                        WHERE ed.id = %s
+                          AND ps.user_id = %s
+                        FOR UPDATE OF ed
+                    """, (
+                        extracted_document_id,
+                        user_id
+                    ))
 
                     record = cursor.fetchone()
 
@@ -2400,10 +2812,13 @@ def verify_marksheet(extracted_document_id: UUID):
                             detail="Extracted document not found"
                         )
 
-                    document_type, metadata = record
+                    document_type, metadata, session_id = record
 
-                    # 2. Check document type
-                    if document_type not in ("marksheet", "transcript"):
+                    # 2. Validate document type.
+                    if document_type not in (
+                        "marksheet",
+                        "transcript"
+                    ):
                         raise HTTPException(
                             status_code=400,
                             detail="Document is not a marksheet or transcript"
@@ -2411,10 +2826,11 @@ def verify_marksheet(extracted_document_id: UUID):
 
                     metadata = metadata or {}
 
-                    # 3. Prefer corrected data over original extraction
-                    marksheet_data = metadata.get(
-                        "marksheet_corrected"
-                    ) or metadata.get("marksheet_extraction")
+                    # 3. Prefer corrected information.
+                    marksheet_data = (
+                        metadata.get("marksheet_corrected")
+                        or metadata.get("marksheet_extraction")
+                    )
 
                     if not marksheet_data:
                         raise HTTPException(
@@ -2422,7 +2838,7 @@ def verify_marksheet(extracted_document_id: UUID):
                             detail="No marksheet extraction found"
                         )
 
-                    # 4. Validate essential information
+                    # 4. Validate essential information.
                     student = marksheet_data.get("student") or {}
                     semesters = marksheet_data.get("semesters") or []
 
@@ -2447,30 +2863,142 @@ def verify_marksheet(extracted_document_id: UUID):
                             detail="No subject information found"
                         )
 
-                    # 5. Mark as verified
-                    verified_at = datetime.now(timezone.utc).isoformat()
+                    # 5. Mark the marksheet as verified.
+                    verified_at = datetime.now(
+                        timezone.utc
+                    ).isoformat()
 
                     metadata["marksheet_verification_status"] = "verified"
                     metadata["marksheet_verified_at"] = verified_at
 
-                    cursor.execute(
-                        """
+                    cursor.execute("""
                         UPDATE extracted_documents
                         SET extraction_metadata = %s
                         WHERE id = %s
-                        """,
-                        (
-                            Jsonb(metadata),
-                            extracted_document_id
+                    """, (
+                        Jsonb(metadata),
+                        extracted_document_id
+                    ))
+
+                    # 6. Build a whitelist of academic profile fields.
+                    academic_data = {
+                        "college_name": student.get("college_name"),
+                        "university_name": student.get("university_name"),
+                        "degree": student.get("degree"),
+                        "branch": student.get("branch"),
+                        "usn": student.get("usn"),
+                        "year_of_passing": marksheet_data.get(
+                            "year_of_passing"
+                        ),
+                        "cgpa": marksheet_data.get("cgpa"),
+                        "school_name": student.get("school_name"),
+                        "board": student.get("board"),
+                        "stream": student.get("stream")
+                    }
+
+                    # Remove missing or empty values.
+                    academic_data = {
+                        key: value
+                        for key, value in academic_data.items()
+                        if value is not None
+                        and str(value).strip()
+                    }
+
+                    if not academic_data:
+                        raise HTTPException(
+                            status_code=422,
+                            detail="No academic profile information found"
                         )
-                    )
+
+                    # 7. Find the user's latest draft across sessions.
+                    cursor.execute("""
+                        SELECT
+                            id,
+                            session_id,
+                            profile_data
+                        FROM verified_profiles
+                        WHERE user_id = %s
+                          AND status = 'draft'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        FOR UPDATE
+                    """, (user_id,))
+
+                    existing_profile = cursor.fetchone()
+
+                    if existing_profile:
+
+                        profile_id, profile_session_id, existing_data = (
+                            existing_profile
+                        )
+
+                        merged_data = dict(existing_data or {})
+
+                        # Preserve existing non-empty values.
+                        for field_name, value in academic_data.items():
+
+                            existing_value = merged_data.get(field_name)
+
+                            if (
+                                existing_value is None
+                                or not str(existing_value).strip()
+                            ):
+                                merged_data[field_name] = value
+
+                        cursor.execute("""
+                            UPDATE verified_profiles
+                            SET profile_data = %s
+                            WHERE id = %s
+                              AND user_id = %s
+                              AND status = 'draft'
+                            RETURNING id
+                        """, (
+                            Jsonb(merged_data),
+                            profile_id,
+                            user_id
+                        ))
+
+                        updated_profile = cursor.fetchone()
+
+                        if not updated_profile:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="Draft profile could not be updated"
+                            )
+
+                    else:
+
+                        # 8. Create a new draft if none exists.
+                        cursor.execute("""
+                            INSERT INTO verified_profiles (
+                                id,
+                                session_id,
+                                user_id,
+                                profile_data,
+                                status,
+                                approved_at
+                            )
+                            VALUES (
+                                %s, %s, %s, %s, 'draft', NULL
+                            )
+                            RETURNING id
+                        """, (
+                            uuid.uuid4(),
+                            session_id,
+                            user_id,
+                            Jsonb(academic_data)
+                        ))
+
+                        updated_profile = cursor.fetchone()
+                        profile_id = updated_profile[0]
 
         return {
-            "message": "Marksheet verified successfully",
+            "message": "Marksheet verified and academic profile updated successfully",
             "extracted_document_id": str(extracted_document_id),
+            "profile_id": str(profile_id),
             "verification_status": "verified",
-            "verified_at": verified_at,
-            "verified_details": marksheet_data
+            "academic_fields": list(academic_data.keys()),
+            "verified_at": verified_at
         }
 
     except HTTPException:
@@ -2481,36 +3009,57 @@ def verify_marksheet(extracted_document_id: UUID):
 
         raise HTTPException(
             status_code=500,
-            detail="Could not verify marksheet"
+            detail="Could not verify marksheet and update profile"
         )
 
 @router.post("/extracted/{extracted_document_id}/extract-resume")
-def extract_resume_from_document(extracted_document_id: UUID):
+def extract_resume_from_document(
+    extracted_document_id: UUID,
+    request: Request
+):
     """
     Extract structured resume information and save it in extraction_metadata.
+    Only the document owner can perform extraction.
     The original extracted text is preserved.
     """
+
+    # 1. Authenticate the user.
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Please log in first."
+        )
+
     try:
         pool = get_db_pool()
 
         with pool.connection() as conn:
             with conn.transaction():
                 with conn.cursor() as cursor:
-                    # Lock the row so simultaneous requests cannot save
-                    # duplicate resume extractions.
+
+                    # 2. Retrieve and lock the document only if
+                    # it belongs to the authenticated user.
                     cursor.execute(
                         """
                         SELECT
-                            document_type,
-                            extraction_status,
-                            extracted_text,
-                            extraction_metadata
-                        FROM extracted_documents
-                        WHERE id = %s
-                        FOR UPDATE
+                            ed.document_type,
+                            ed.extraction_status,
+                            ed.extracted_text,
+                            ed.extraction_metadata
+                        FROM extracted_documents ed
+                        JOIN documents d
+                            ON d.id = ed.document_id
+                        JOIN processing_sessions ps
+                            ON ps.id = d.session_id
+                        WHERE ed.id = %s
+                          AND ps.user_id = %s
+                        FOR UPDATE OF ed
                         """,
-                        (extracted_document_id,)
+                        (extracted_document_id, user_id)
                     )
+
                     record = cursor.fetchone()
 
                     if not record:
@@ -2526,6 +3075,7 @@ def extract_resume_from_document(extracted_document_id: UUID):
                         metadata
                     ) = record
 
+                    # 3. Validate document type.
                     if document_type != "resume":
                         raise HTTPException(
                             status_code=400,
@@ -2546,14 +3096,14 @@ def extract_resume_from_document(extracted_document_id: UUID):
 
                     metadata = metadata or {}
 
+                    # 4. Prevent duplicate extraction.
                     if metadata.get("resume_extraction"):
                         raise HTTPException(
                             status_code=409,
                             detail="Resume information has already been extracted"
                         )
 
-                    # Call the resume extraction service while holding the
-                    # row lock to prevent concurrent duplicate extraction.
+                    # 5. Extract structured resume information.
                     details = extract_resume_details(extracted_text)
                     resume_data = details.model_dump(mode="json")
 
@@ -2562,17 +3112,34 @@ def extract_resume_from_document(extracted_document_id: UUID):
                         "resume_verification_status": "needs_review"
                     })
 
+                    # 6. Save only if the document still belongs
+                    # to the authenticated user.
                     cursor.execute(
                         """
-                        UPDATE extracted_documents
+                        UPDATE extracted_documents ed
                         SET extraction_metadata = %s
-                        WHERE id = %s
+                        WHERE ed.id = %s
+                          AND EXISTS (
+                              SELECT 1
+                              FROM documents d
+                              JOIN processing_sessions ps
+                                  ON ps.id = d.session_id
+                              WHERE d.id = ed.document_id
+                                AND ps.user_id = %s
+                          )
                         """,
                         (
                             Jsonb(metadata),
-                            extracted_document_id
+                            extracted_document_id,
+                            user_id
                         )
                     )
+
+                    if cursor.rowcount != 1:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="Extracted document not found"
+                        )
 
         logger.info(
             "Resume extraction completed for document %s",
@@ -2597,18 +3164,34 @@ def extract_resume_from_document(extracted_document_id: UUID):
             detail="Resume extraction or database storage failed"
         )
 
-
 @router.get("/extracted/{extracted_document_id}/review-resume")
-def get_resume_for_review(extracted_document_id: UUID):
+def get_resume_for_review(
+    extracted_document_id: UUID,
+    request: Request
+):
     """
     Retrieve extracted resume information for user review.
     Corrected data is preferred when available.
+    Only the document owner can access the resume.
     """
+
+    # 1. Authenticate the user.
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Please log in first."
+        )
+
     try:
         pool = get_db_pool()
 
         with pool.connection() as conn:
             with conn.cursor() as cursor:
+
+                # 2. Retrieve the resume only if it belongs
+                # to the authenticated user.
                 cursor.execute(
                     """
                     SELECT
@@ -2621,10 +3204,14 @@ def get_resume_for_review(extracted_document_id: UUID):
                     FROM extracted_documents ed
                     JOIN documents d
                         ON d.id = ed.document_id
+                    JOIN processing_sessions ps
+                        ON ps.id = d.session_id
                     WHERE ed.id = %s
+                      AND ps.user_id = %s
                     """,
-                    (extracted_document_id,)
+                    (extracted_document_id, user_id)
                 )
+
                 record = cursor.fetchone()
 
         if not record:
@@ -2642,13 +3229,16 @@ def get_resume_for_review(extracted_document_id: UUID):
             filename
         ) = record
 
+        # 3. Validate document type.
         if document_type != "resume":
             raise HTTPException(
                 status_code=400,
                 detail="Document is not classified as a resume"
             )
 
+        # 4. Retrieve extracted or corrected resume information.
         metadata = extraction_metadata or {}
+
         resume_data = (
             metadata.get("resume_corrected")
             or metadata.get("resume_extraction")
@@ -2665,6 +3255,7 @@ def get_resume_for_review(extracted_document_id: UUID):
             "needs_review"
         )
 
+        # 5. Return resume review information.
         return {
             "message": "Resume review information retrieved successfully",
             "extracted_document_id": str(extracted_id),
@@ -2682,8 +3273,162 @@ def get_resume_for_review(extracted_document_id: UUID):
         raise
 
     except Exception:
-        logger.exception("Could not retrieve resume review information")
+        logger.exception(
+            "Could not retrieve resume review information"
+        )
         raise HTTPException(
             status_code=500,
             detail="Could not retrieve resume review information"
         )
+
+
+@router.post("/auto-process/{document_id}")
+def auto_process_document(
+    document_id: UUID,
+    request: Request
+):
+    """
+    Automatically classify and process every document
+    found inside an uploaded PDF.
+
+    All processing is restricted to the authenticated user.
+    Extracted information is saved as a draft, never auto-approved.
+    """
+
+    user_id = get_authenticated_user_id(request)
+
+    if not user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Please sign in first."
+        )
+
+    # 1. Classify the uploaded PDF.
+    classification = classify_uploaded_document(
+        document_id,
+        request
+    )
+
+    results = []
+    profile_id = None
+
+    # 2. Process every classified document.
+    for item in classification["documents"]:
+
+        extracted_id = UUID(item["extracted_document_id"])
+        document_type = item["document_type"]
+        document_subtype = item.get("document_subtype")
+
+        result = {
+            "extracted_document_id": str(extracted_id),
+            "document_type": document_type,
+            "document_subtype": document_subtype,
+            "status": "pending"
+        }
+
+        try:
+
+            # Aadhaar identity document.
+            if (
+                document_type == "identity_document"
+                and document_subtype == "aadhaar"
+            ):
+
+                extraction = extract_aadhaar_from_document(
+                    extracted_id,
+                    request
+                )
+
+                saved_profile = save_profile(
+                    extracted_id,
+                    request
+                )
+
+                profile_id = saved_profile["profile_id"]
+
+                result.update({
+                    "status": "processed",
+                    "message": "Identity information extracted",
+                    "profile_id": profile_id,
+                    "review_required": True
+                })
+
+            # Academic documents.
+            elif document_type in ("marksheet", "transcript"):
+
+                extract_marksheet_from_document(
+                    extracted_id,
+                    request
+                )
+
+                result.update({
+                    "status": "processed",
+                    "message": "Academic information extracted",
+                    "review_required": True,
+                    "verification_required": True
+                })
+
+            # Resume.
+            elif document_type == "resume":
+
+                extract_resume_from_document(
+                    extracted_id,
+                    request
+                )
+
+                result.update({
+                    "status": "processed",
+                    "message": "Resume information extracted",
+                    "review_required": True
+                })
+
+            else:
+
+                result.update({
+                    "status": "skipped",
+                    "message": "Document type is not supported yet"
+                })
+
+        except HTTPException as exc:
+
+            result.update({
+                "status": "failed",
+                "message": str(exc.detail)
+            })
+
+            logger.warning(
+                "Automatic processing failed for %s: %s",
+                extracted_id,
+                exc.detail
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Unexpected processing failure for %s",
+                extracted_id
+            )
+
+            result.update({
+                "status": "failed",
+                "message": "Could not process this document"
+            })
+
+        results.append(result)
+
+    # 3. Return a processing summary.
+    return {
+        "message": "Automatic document processing completed",
+        "document_id": str(document_id),
+        "profile_id": profile_id,
+        "total_documents": len(results),
+        "processed": sum(
+            item["status"] == "processed"
+            for item in results
+        ),
+        "failed": sum(
+            item["status"] == "failed"
+            for item in results
+        ),
+        "documents": results
+    }

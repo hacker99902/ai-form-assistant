@@ -256,23 +256,43 @@ ADDITIONAL INSTRUCTIONS:
 3. Extract school and board names from the document heading
    or institution details.
 
-4. Extract every subject visible in the document.
+4. Extract EVERY subject visible in the document.
+   Never omit a subject because its marks are missing.
 
-5. Do not omit subjects simply because their marks are absent.
+5. IMPORTANT: The semesters array must contain academic
+   examination records for individual marksheets too.
 
-6. For individual Class 10 and Class 12 marksheets,
-   use a semester record only when the document actually
-   represents a semester-based examination.
+6. For Class 10 / SSLC marksheets:
+   - Create exactly one academic record.
+   - Set semester_number to null.
+   - Set semester_name to "Class 10 Examination".
+   - Put every Class 10 subject inside its subjects array.
+   - Extract marks and maximum marks as printed.
 
-7. For consolidated transcripts, include every semester.
+7. For Class 12 / PUC marksheets:
+   - Create one academic record for the examination.
+   - Set semester_number to null.
+   - Set semester_name to "Class 12 Examination".
+   - Include all subjects and their marks.
 
-8. Do not create fictional semester records.
+8. For engineering marksheets:
+   - Create separate records for each semester.
+   - Preserve semester numbers and names.
 
-9. Use null for unavailable values.
+9. For consolidated transcripts:
+   - Include every semester separately.
 
-10. Do not calculate missing values.
+10. Do not create fictional subjects, marks or grades.
 
-11. Return only valid JSON.
+11. Do not calculate missing values.
+
+12. If subject names are available but marks are missing,
+    still include the subject with null marks.
+
+13. Extract total marks and maximum marks only when
+    explicitly available in the document.
+
+14. Return only valid JSON matching the requested structure.
 """
 
 

@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     OPENROUTER_API_KEY: str
     OPENROUTER_MODEL: str = "openrouter/free"
-
+    ENABLE_LOCAL_AADHAAR_FILL: bool = False
     GROQ_API_KEY: str
     GROQ_MODEL: str = "openai/gpt-oss-20b"
     FIELD_ENCRYPTION_KEY: str

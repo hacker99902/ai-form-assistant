@@ -1,16 +1,14 @@
+
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Form Assistant</title>
-
     <link rel="stylesheet" href="popup.css">
 </head>
 
 <body>
-
     <div class="container">
 
         <header>
@@ -18,39 +16,61 @@
             <p>Fill website forms intelligently.</p>
         </header>
 
+        <!-- Authentication -->
+        <section class="profile-section">
+            <h3>Account</h3>
 
-        <div class="profile-section">
+            <p id="authStatus">Not signed in</p>
+
+            <button id="googleLoginButton">
+                Sign in with Google
+            </button>
+
+            <button id="logoutButton" hidden>
+                Sign Out
+            </button>
+        </section>
+
+        <!-- Document Upload -->
+        <section class="profile-section">
+            <h3>Upload Your Documents</h3>
+
+            <p>Select your academic and identity documents (PDF only).</p>
+
+            <input
+                type="file"
+                id="documentFiles"
+                accept=".pdf,application/pdf"
+            >
+
+            <button id="uploadDocumentsButton">
+                Upload Documents
+            </button>
+
+            <p id="uploadStatus"></p>
+        </section>
+
+        <!-- Student Profile -->
+        <section class="profile-section">
             <h3>Student Profile</h3>
 
             <p id="profileStatus">
-                Checking profile...
+                Sign in to load your profile.
             </p>
-
-            <label for="profileIdInput">Profile ID</label>
-
-            <input type="text" id="profileIdInput" placeholder="Paste your saved profile ID">
-
-            <button id="connectProfileButton">
-                Connect Profile
-            </button>
-        </div>
-
-
-        <div class="actions">
-
-            <button id="fillFormButton">
-                ✨ Fill This Website
-            </button>
 
             <button id="refreshProfileButton">
                 Refresh Profile
             </button>
+        </section>
 
-        </div>
+        <!-- Autofill -->
+        <section class="actions">
+            <button id="fillFormButton">
+                ✨ Fill This Website
+            </button>
+        </section>
 
-        <p id="statusMessage">
-            Ready to assist.
-        </p>
+        <p id="statusMessage">Ready to assist.</p>
 
         <footer>
             <p>AI Form Assistant v1.0.0</p>
@@ -59,7 +79,5 @@
     </div>
 
     <script src="popup.js"></script>
-
 </body>
-
 </html>

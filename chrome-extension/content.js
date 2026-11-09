@@ -1,160 +1,231 @@
 
 // Prevent registering the message listener multiple times
 if (!window.aiFormAssistantListenerAdded) {
-
     window.aiFormAssistantListenerAdded = true;
 
     console.log("AI Form Assistant content script loaded.");
 
-    // Normalize field names for matching
+    // Normalize text for reliable matching
     function normalize(text) {
         return String(text || "")
             .toLowerCase()
             .replace(/[^a-z0-9]/g, "");
     }
 
+    // Explicit aliases for supported profile fields
+    const FIELD_ALIASES = {
+        full_name: ["fullname", "studentname", "applicantname"],
+        date_of_birth: ["dateofbirth", "dob", "birthdate"],
+        gender: ["gender", "sex"],
 
-    // Get the label or identifying text of an input
-    function getFieldDescription(field) {
+        father_or_husband_name: [
+            "fathername",
+            "husbandname",
+            "fatherorhusbandname"
+        ],
 
-        const parts = [
-            field.name,
-            field.id,
-            field.placeholder,
-            field.getAttribute("aria-label"),
-            field.getAttribute("autocomplete")
-        ];
+        mobile_number: [
+            "mobilenumber",
+            "phonenumber",
+            "contactnumber"
+        ],
+
+        email: ["email", "emailaddress"],
+
+        address: [
+            "fulladdress",
+            "completeaddress",
+            "residentialaddress"
+        ],
+
+        address_city: ["city", "addresscity"],
+        address_state: ["state", "addressstate"],
+        address_district: ["district", "addressdistrict"],
+        address_pincode: ["pincode", "postalcode", "zipcode"],
+
+        address_street: ["street", "streetaddress", "addressstreet"],
+        address_locality: ["locality", "addresslocality"],
+        address_house_number: ["housenumber", "addresshousenumber"],
+
+        school_name: ["schoolname"],
+        board: ["board", "educationboard"],
+        college_name: ["collegename"],
+        university_name: ["universityname"],
+        degree: ["degree"],
+        branch: ["branch", "department"],
+        stream: ["stream"],
+        usn: ["usn", "universityseatnumber"],
+        year_of_passing: ["yearofpassing", "passingyear"],
+        cgpa: ["cgpa"],
+        percentage: ["percentage"]
+    };
+
+    // Get field identifiers in priority order
+    function getFieldDescriptions(field) {
+        const descriptions = [];
+
+        function add(value, priority) {
+            const normalized = normalize(value);
+
+            if (normalized) {
+                descriptions.push({
+                    value: normalized,
+                    priority
+                });
+            }
+        }
+
+        add(field.name, 100);
+        add(field.id, 95);
+        add(field.getAttribute("autocomplete"), 90);
+        add(field.getAttribute("aria-label"), 85);
 
         if (field.labels) {
             for (const label of field.labels) {
-                parts.push(label.innerText);
+                add(label.innerText, 80);
             }
         }
 
         const parentLabel = field.closest("label");
 
         if (parentLabel) {
-            parts.push(parentLabel.innerText);
+            add(parentLabel.innerText, 75);
         }
 
-        return parts.filter(Boolean).join(" ");
+        add(field.placeholder, 60);
+
+        return descriptions;
     }
 
-
-    // Convert the saved profile into searchable field mappings
+    // Convert saved profile into searchable mappings
     function buildProfileMappings(profile) {
-
         const mappings = [];
 
-        function addMapping(keys, value) {
-
-            if (
-                value === null ||
-                value === undefined ||
-                String(value).trim() === ""
-            ) {
-                return;
-            }
-
-            mappings.push({
-                keys: keys.map(normalize),
-                value: String(value).trim()
-            });
-        }
-
-        // Recursively inspect profile objects
-        function inspectObject(object, prefix = "") {
-
+        function inspect(object) {
             if (!object || typeof object !== "object") {
                 return;
             }
 
             for (const [key, value] of Object.entries(object)) {
 
-                const fullKey = prefix
-                    ? `${prefix} ${key}`
-                    : key;
-
-                if (value && typeof value === "object") {
-                    inspectObject(value, fullKey);
-                } else {
-                    addMapping([key, fullKey], value);
-                }
-            }
-        }
-
-        inspectObject(profile);
-
-        return mappings;
-    }
-
-
-    // Find the best matching profile value
-    function findMatchingValue(description, mappings) {
-
-        const fieldName = normalize(description);
-
-        if (!fieldName) {
-            return null;
-        }
-
-        // Aadhaar is deliberately excluded from automatic retrieval
-        if (
-            fieldName.includes("aadhaar") ||
-            fieldName.includes("uid")
-        ) {
-            return null;
-        }
-
-        for (const mapping of mappings) {
-
-            for (const key of mapping.keys) {
-
-                if (!key || key.length < 3) {
+                if (
+                    value &&
+                    typeof value === "object" &&
+                    !Array.isArray(value)
+                ) {
+                    inspect(value);
                     continue;
                 }
 
                 if (
-                    fieldName.includes(key) ||
-                    key.includes(fieldName)
+                    value === null ||
+                    value === undefined ||
+                    String(value).trim() === ""
                 ) {
-                    return mapping.value;
+                    continue;
+                }
+
+                const normalizedKey = normalize(key);
+
+                // Never include Aadhaar or UID
+                if (
+                    normalizedKey.includes("aadhaar") ||
+                    normalizedKey.includes("uid")
+                ) {
+                    continue;
+                }
+
+                const aliases = FIELD_ALIASES[key] || [];
+
+                mappings.push({
+                    key: normalizedKey,
+                    aliases: [
+                        normalizedKey,
+                        ...aliases.map(normalize)
+                    ],
+                    value: String(value).trim()
+                });
+            }
+        }
+
+        inspect(profile);
+
+        return mappings;
+    }
+
+    // Find the best matching profile value
+    function findMatchingValue(field, mappings) {
+        const descriptions = getFieldDescriptions(field);
+
+        if (!descriptions.length) {
+            return null;
+        }
+
+        // Never autofill sensitive or credential fields
+        const forbidden = [
+            "aadhaar",
+            "uid",
+            "password",
+            "otp",
+            "captcha",
+            "creditcard"
+        ];
+
+        if (
+            descriptions.some(description =>
+                forbidden.some(word =>
+                    description.value.includes(word)
+                )
+            )
+        ) {
+            return null;
+        }
+
+        const candidates = [];
+
+        for (const description of descriptions) {
+            for (const mapping of mappings) {
+                for (const alias of mapping.aliases) {
+
+                    if (!alias || alias.length < 3) {
+                        continue;
+                    }
+
+                    // Exact matching only
+                    if (description.value === alias) {
+                        candidates.push({
+                            mapping,
+                            priority: description.priority,
+                            aliasLength: alias.length
+                        });
+                    }
                 }
             }
         }
 
-        return null;
+        if (!candidates.length) {
+            return null;
+        }
+
+        candidates.sort((a, b) =>
+            b.priority - a.priority ||
+            b.aliasLength - a.aliasLength
+        );
+
+        return candidates[0].mapping.value;
     }
 
+    // Set values using native setters
+    function setNativeValue(field, value) {
+        let prototype;
 
-    // Fill a normal input field
-    function fillInput(field, value) {
-
-        // Preserve existing user-entered information
-        if (field.value.trim() !== "") {
-            return false;
+        if (field instanceof HTMLTextAreaElement) {
+            prototype = HTMLTextAreaElement.prototype;
+        } else if (field instanceof HTMLSelectElement) {
+            prototype = HTMLSelectElement.prototype;
+        } else {
+            prototype = HTMLInputElement.prototype;
         }
-
-        if (
-            field.type === "hidden" ||
-            field.type === "password" ||
-            field.type === "file" ||
-            field.type === "submit" ||
-            field.type === "button"
-        ) {
-            return false;
-        }
-
-        if (
-            field.type === "checkbox" ||
-            field.type === "radio"
-        ) {
-            return false;
-        }
-
-        const prototype = field instanceof HTMLTextAreaElement
-            ? HTMLTextAreaElement.prototype
-            : HTMLInputElement.prototype;
 
         const setter = Object.getOwnPropertyDescriptor(
             prototype,
@@ -174,28 +245,89 @@ if (!window.aiFormAssistantListenerAdded) {
         field.dispatchEvent(
             new Event("change", { bubbles: true })
         );
-
-        return true;
     }
 
+    // Handle date formats
+    function prepareValue(field, value) {
+        if (field.type === "date") {
 
-    // Fill dropdowns when an option matches
+            const iso = String(value).match(
+                /^(\d{4})-(\d{2})-(\d{2})$/
+            );
+
+            if (iso) {
+                return value;
+            }
+
+            const indian = String(value).match(
+                /^(\d{2})-(\d{2})-(\d{4})$/
+            );
+
+            if (indian) {
+                return `${indian[3]}-${indian[2]}-${indian[1]}`;
+            }
+        }
+
+        return String(value);
+    }
+
+    // Fill text, date and other supported inputs
+    function fillInput(field, value) {
+
+        // Preserve existing values
+        if (String(field.value).trim() !== "") {
+            return false;
+        }
+
+        if (
+            field.disabled ||
+            field.readOnly ||
+            [
+                "hidden",
+                "password",
+                "file",
+                "submit",
+                "button",
+                "reset",
+                "checkbox",
+                "radio"
+            ].includes(field.type)
+        ) {
+            return false;
+        }
+
+        const preparedValue = prepareValue(field, value);
+
+        try {
+            setNativeValue(field, preparedValue);
+            return true;
+        } catch (error) {
+            console.warn(
+                "Could not fill field:",
+                field,
+                error
+            );
+
+            return false;
+        }
+    }
+
+    // Fill dropdowns
     function fillSelect(field, value) {
 
-        if (field.value !== "") {
+        if (field.value !== "" || field.disabled) {
             return false;
         }
 
         const wanted = normalize(value);
 
-        const matchingOption = Array.from(field.options).find(option => {
-
-            const optionText = normalize(option.textContent);
-            const optionValue = normalize(option.value);
+        const matchingOption = Array.from(
+            field.options
+        ).find(option => {
 
             return (
-                optionText === wanted ||
-                optionValue === wanted
+                normalize(option.textContent) === wanted ||
+                normalize(option.value) === wanted
             );
         });
 
@@ -203,19 +335,13 @@ if (!window.aiFormAssistantListenerAdded) {
             return false;
         }
 
-        field.value = matchingOption.value;
-
-        field.dispatchEvent(
-            new Event("change", { bubbles: true })
-        );
+        setNativeValue(field, matchingOption.value);
 
         return true;
     }
 
-
     // Main autofill operation
     function fillWebsiteForm(profile) {
-
         const mappings = buildProfileMappings(profile);
 
         const fields = document.querySelectorAll(
@@ -227,69 +353,67 @@ if (!window.aiFormAssistantListenerAdded) {
 
         fields.forEach(field => {
 
-            const description = getFieldDescription(field);
-
             const value = findMatchingValue(
-                description,
+                field,
                 mappings
             );
 
-            if (!value) {
+            if (value === null) {
                 skippedCount++;
                 return;
             }
 
-            let filled = false;
-
-            if (field.tagName === "SELECT") {
-                filled = fillSelect(field, value);
-            } else {
-                filled = fillInput(field, value);
-            }
+            const filled = field.tagName === "SELECT"
+                ? fillSelect(field, value)
+                : fillInput(field, value);
 
             if (filled) {
                 filledCount++;
+
+                console.log(
+                    "Autofilled:",
+                    field.name || field.id
+                );
             } else {
                 skippedCount++;
             }
-
         });
 
         return {
             success: true,
-            message: `Filled ${filledCount} fields. ${skippedCount} fields were skipped.`,
+            message: `Filled ${filledCount} fields. ${skippedCount} skipped.`,
             filledCount,
             skippedCount
         };
     }
 
-
     // Receive autofill requests from background.js
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    chrome.runtime.onMessage.addListener(
+        (message, sender, sendResponse) => {
 
-        if (message.type === "FILL_FORM") {
+            if (message.type === "FILL_FORM") {
+                try {
+                    const result = fillWebsiteForm(
+                        message.profile
+                    );
 
-            try {
+                    sendResponse(result);
 
-                const result = fillWebsiteForm(message.profile);
+                } catch (error) {
 
-                sendResponse(result);
+                    console.error(
+                        "Autofill error:",
+                        error
+                    );
 
-            } catch (error) {
-
-                console.error("Autofill error:", error);
-
-                sendResponse({
-                    success: false,
-                    message: "An error occurred while filling the form."
-                });
-
+                    sendResponse({
+                        success: false,
+                        message: "An error occurred while filling the form."
+                    });
+                }
             }
 
+            return true;
         }
-
-        return true;
-
-    });
-
+    );
 }

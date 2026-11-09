@@ -52,6 +52,16 @@ async function uploadPDF(sessionId, file) {
     );
 }
 
+
+// Automatically classify and process all documents in an uploaded PDF.
+async function autoProcessDocument(documentId) {
+    return await apiRequest(
+        `${API_BASE_URL}/documents/auto-process/${encodeURIComponent(documentId)}`,
+        { method: "POST" }
+    );
+}
+
+
 // Classify uploaded document
 async function classifyDocument(documentId) {
     return await apiRequest(
@@ -116,3 +126,4 @@ async function verifyProfileField(extractedDocumentId, fieldName) {
         { method: "POST" }
     );
 }
+    

@@ -33,11 +33,16 @@ let currentExtractedDocumentId = null;
 let currentProfileId = null;
 let currentFields = {};
 
+let currentClass10DocumentId = null;
+let currentClass12DocumentId = null;
+let currentEngineeringDocumentIds = [];
+
 let currentClass10Details = null;
 let currentClass12Details = null;
 let currentEngineeringDetails = [];
 
 let academicExtractionErrors = [];
+let originalMarksheetValues = {};
 
 
 // Initial UI setup
@@ -167,33 +172,26 @@ function renderFields(details) {
 // MARKSHEET EXTRACTION API
 // ==========================================
 
-async function extractAndGetMarksheet(id) {
 
+async function extractAndGetMarksheet(id) {
     const base =
         `${API_BASE_URL}/documents/extracted/${encodeURIComponent(id)}`;
 
-    const extractResponse = await fetch(
-        `${base}/extract-marksheet`,
-        { method: "POST" }
-    );
+    // Automatic processing already extracted this marksheet.
+    // Only retrieve its saved result.
+    const response = await fetch(`${base}/review-marksheet`, {
+        credentials: "include"
+    });
 
-    if (!extractResponse.ok && extractResponse.status !== 409) {
-        await handleResponse(extractResponse);
-    } else if (extractResponse.ok) {
-        await handleResponse(extractResponse);
-    }
-
-    const reviewResponse = await fetch(
-        `${base}/review-marksheet`
-    );
-
-    const review = await handleResponse(reviewResponse);
+    const review = await handleResponse(response);
 
     if (!review.details) {
         throw new Error(
-            "No marksheet details returned by the backend."
+            "No saved marksheet extraction was returned."
         );
     }
+
+    console.log("Retrieved marksheet:", review.details);
 
     return review.details;
 }
@@ -603,9 +601,7 @@ function getEngineeringMapping(documents) {
 // ==========================================
 
 if (uploadButton) {
-
     uploadButton.addEventListener("click", async () => {
-
         const file = pdfInput?.files?.[0];
 
         if (!file) {
@@ -627,7 +623,6 @@ if (uploadButton) {
 
         if (reviewSection) reviewSection.hidden = true;
         if (formSection) formSection.hidden = true;
-        if (proceedButton) proceedButton.hidden = true;
 
         currentExtractedDocumentId = null;
         currentProfileId = null;
@@ -636,90 +631,94 @@ if (uploadButton) {
         currentClass10Details = null;
         currentClass12Details = null;
         currentEngineeringDetails = [];
-
+        currentClass10DocumentId = null;
+        currentClass12DocumentId = null;
+        currentEngineeringDocumentIds = [];
         academicExtractionErrors = [];
+        originalMarksheetValues = {};
 
         try {
-
-            // 1. CREATE SESSION
-
+            // 1. Create processing session
             setStatus("Creating session...");
-
             const sessionId = await createSession();
 
-
-            // 2. UPLOAD PDF
-
+            // 2. Upload PDF
             setStatus("Uploading PDF...");
+            const upload = await uploadPDF(sessionId, file);
 
-            const upload = await uploadPDF(
-                sessionId,
-                file
-            );
+            if (!upload.document_id) {
+                throw new Error("Upload completed without a document ID.");
+            }
 
+            // 3. Automatically classify and process all documents
+            setStatus("AI is classifying and extracting your documents...");
 
-            // 3. CLASSIFY DOCUMENTS
-
-            setStatus("Classifying documents...");
-
-            const classification = await classifyDocument(
+            const processing = await autoProcessDocument(
                 upload.document_id
             );
 
-            const documents = classification.documents || [];
-
-
-            // 4. FIND AADHAAR
+            // 4. Find processed documents
+            const documents = processing.documents || [];
 
             const aadhaarDoc = documents.find(doc =>
                 doc.document_type === "identity_document" &&
-                doc.document_subtype === "aadhaar"
+                doc.document_subtype === "aadhaar" &&
+                doc.status === "processed"
+            );
+
+            const academicDocs = documents.filter(doc =>
+                ["marksheet", "transcript"].includes(doc.document_type) &&
+                doc.status === "processed"
             );
 
             if (!aadhaarDoc) {
-                throw new Error("No Aadhaar document detected.");
+                throw new Error(
+                    "Aadhaar was not successfully processed. Please check your uploaded documents."
+                );
             }
 
             currentExtractedDocumentId =
                 aadhaarDoc.extracted_document_id;
 
+            currentProfileId = processing.profile_id;
 
-            // 5. EXTRACT AADHAAR
+            // 5. Retrieve Aadhaar review details
+            setStatus("Loading extracted identity information...");
 
-            setStatus("Extracting Aadhaar information...");
-
-            const aadhaar = await extractAadhaar(
+            const aadhaar = await getDocumentReview(
                 currentExtractedDocumentId
             );
 
+            if (!aadhaar.fields) {
+                throw new Error("No extracted identity fields were returned.");
+            }
 
-            // 6. FIND ACADEMIC DOCUMENTS
+            // Convert the backend review format into the format
+            // expected by the existing renderFields() function.
+            const identityDetails = {};
 
-            const academicDocs = documents.filter(doc =>
-                ["marksheet", "transcript"].includes(
-                    doc.document_type
-                )
-            );
+            for (const [name, field] of Object.entries(aadhaar.fields)) {
+                identityDetails[name] = field.value;
+            }
 
+            identityDetails.address_components = {
+                house_number: identityDetails.address_house_number,
+                street: identityDetails.address_street,
+                locality: identityDetails.address_locality,
+                city: identityDetails.address_city,
+                district: identityDetails.address_district,
+                state: identityDetails.address_state,
+                pincode: identityDetails.address_pincode
+            };
 
-            // 7. EXTRACT ACADEMIC DOCUMENTS
-
-            for (
-                let i = 0;
-                i < academicDocs.length;
-                i++
-            ) {
-
+            // 6. Retrieve marksheet details
+            for (let i = 0; i < academicDocs.length; i++) {
                 const doc = academicDocs[i];
-
-                const subtype =
-                    doc.document_subtype || "academic document";
+                const subtype = doc.document_subtype || "academic document";
 
                 try {
-
                     setStatus(
-                        `Extracting ${subtype.replaceAll("_", " ")} ` +
-                        `(${i + 1}/${academicDocs.length})...`
+                        `Loading ${subtype.replaceAll("_", " ")} (${i + 1}/${academicDocs.length})...`
                     );
 
                     const details = await extractAndGetMarksheet(
@@ -727,20 +726,13 @@ if (uploadButton) {
                     );
 
                     if (subtype === "class_10") {
-
                         currentClass10Details = details;
-                        console.log(
-                            "CLASS 10 COMPLETE EXTRACTION:",
-                            JSON.stringify(details, null, 2)
-                        );
+                        currentClass10DocumentId = doc.extracted_document_id;
 
                     } else if (subtype === "class_12") {
-
                         currentClass12Details = details;
-                        console.log(
-                            "CLASS 12 COMPLETE EXTRACTION:",
-                            JSON.stringify(details, null, 2)
-                        );
+                        currentClass12DocumentId = doc.extracted_document_id;
+
                     } else if (
                         [
                             "engineering_semester",
@@ -750,14 +742,15 @@ if (uploadButton) {
                         ].includes(subtype) ||
                         doc.document_type === "transcript"
                     ) {
-
                         currentEngineeringDetails.push(details);
+                        currentEngineeringDocumentIds.push(
+                            doc.extracted_document_id
+                        );
                     }
 
                 } catch (error) {
-
                     console.error(
-                        `Extraction failed for ${subtype}:`,
+                        `Could not load ${subtype}:`,
                         error
                     );
 
@@ -767,13 +760,11 @@ if (uploadButton) {
                 }
             }
 
-
-            // 8. DISPLAY AADHAAR INFORMATION
-
-            renderFields(aadhaar.details);
+            // 7. Display extracted identity information
+            renderFields(identityDetails);
 
             if (reviewStatus) {
-                reviewStatus.textContent = "Extraction completed";
+                reviewStatus.textContent = "Needs review";
             }
 
             if (reviewSection) {
@@ -784,58 +775,19 @@ if (uploadButton) {
                 proceedButton.hidden = false;
             }
 
+            // 8. Show processing summary
+            const processedCount = processing.processed ?? 0;
+            const failedCount = processing.failed ?? 0;
 
-            // 9. DISPLAY PROCESSING SUMMARY
-
-            const extracted = [];
-
-            if (currentClass10Details) {
-                extracted.push("Class 10");
-            }
-
-            if (currentClass12Details) {
-                extracted.push("Class 12");
-            }
-
-            if (currentEngineeringDetails.length) {
-                extracted.push("Engineering");
-            }
-
-            let message =
-                `Processing completed. Extracted: ` +
-                `${extracted.join(", ") || "Aadhaar only"}. ` +
-                `Click Proceed to save your profile.`;
-
-            if (academicExtractionErrors.length) {
-
-                message +=
-                    ` ${academicExtractionErrors.length} academic ` +
-                    `extraction(s) failed; see console.`;
-            }
-
-            setStatus(message);
-
-            console.log("Classification completed.");
-            console.log(
-                "Class 10 extracted:",
-                Boolean(currentClass10Details)
-            );
-            console.log(
-                "Class 12 extracted:",
-                Boolean(currentClass12Details)
-            );
-            console.log(
-                "Engineering documents extracted:",
-                currentEngineeringDetails.length
+            setStatus(
+                `Processing complete: ${processedCount} documents processed, ${failedCount} failed. Please review your extracted information.`
             );
 
         } catch (error) {
-
             console.error("Processing error:", error);
             setStatus(error.message);
 
         } finally {
-
             uploadButton.disabled = false;
         }
     });
@@ -952,6 +904,13 @@ function fillFieldsPreservingManualEdits(mapping) {
         }
 
         const newValue = String(value);
+        // Store original extracted marksheet values.
+        if (
+            id.startsWith("sslc") ||
+            id.startsWith("puc")
+        ) {
+            originalMarksheetValues[id] = newValue;
+        }
 
 
         // NEVER OVERWRITE MANUAL EDITS
@@ -1000,18 +959,244 @@ function fillFieldsPreservingManualEdits(mapping) {
     };
 }
 
+function detectMarksheetChanges() {
 
+    const changes = {};
+
+    for (const [id, originalValue] of Object.entries(originalMarksheetValues)) {
+
+        const input = document.getElementById(id);
+
+        if (!input) continue;
+
+        const currentValue = input.value.trim();
+
+        if (currentValue !== originalValue) {
+            changes[id] = {
+                original: originalValue,
+                updated: currentValue
+            };
+        }
+    }
+
+    return changes;
+}
+
+function updateSaveButtonVisibility() {
+
+    const changes = detectMarksheetChanges();
+
+    if (saveChangesButton) {
+        saveChangesButton.hidden =
+            Object.keys(changes).length === 0;
+    }
+}
+
+function attachMarksheetChangeListeners() {
+
+    const marksheetFieldIds = Object.keys(originalMarksheetValues);
+
+    marksheetFieldIds.forEach(id => {
+
+        const input = document.getElementById(id);
+
+        if (!input || input.dataset.saveTrackingAttached === "true") {
+            return;
+        }
+
+        input.addEventListener("input", updateSaveButtonVisibility);
+        input.addEventListener("change", updateSaveButtonVisibility);
+
+        input.dataset.saveTrackingAttached = "true";
+    });
+}
+
+function getSubjectCorrectionLocation(fieldId) {
+
+    const class10Fields = {
+        sslcEnglish: ["english"],
+        sslcLanguage: [
+            "kannada", "hindi", "sanskrit",
+            "tamil", "telugu", "urdu",
+            "malayalam", "language"
+        ],
+        sslcMaths: ["mathematics", "math"],
+        sslcScience: ["science"],
+        sslcSocial: [
+            "social science", "social studies", "social"
+        ]
+    };
+
+    const class12Fields = {
+        pucEnglish: ["english"],
+        pucLanguage: [
+            "kannada", "hindi", "sanskrit",
+            "tamil", "telugu", "urdu",
+            "malayalam", "language"
+        ]
+    };
+
+    let details;
+    let documentId;
+    let keywords;
+
+    if (class10Fields[fieldId]) {
+        details = currentClass10Details;
+        documentId = currentClass10DocumentId;
+        keywords = class10Fields[fieldId];
+
+    } else if (class12Fields[fieldId]) {
+        details = currentClass12Details;
+        documentId = currentClass12DocumentId;
+        keywords = class12Fields[fieldId];
+
+    } else if (/^pucSubject[1-4]$/.test(fieldId)) {
+        details = currentClass12Details;
+        documentId = currentClass12DocumentId;
+
+        const subjectIndex = Number(fieldId.slice(-1)) - 1;
+
+        return {
+            documentId,
+            semesterIndex: 0,
+            subjectIndex
+        };
+    } else {
+        return null;
+    }
+
+    const semesters = getSemesters(details);
+
+    for (let semesterIndex = 0; semesterIndex < semesters.length; semesterIndex++) {
+
+        const subjects = semesters[semesterIndex].subjects || [];
+
+        const subjectIndex = subjects.findIndex(subject => {
+            const name = asText(subject.subject_name).toLowerCase();
+            const code = asText(subject.subject_code).toLowerCase();
+
+            return keywords.some(keyword =>
+                name.includes(keyword) || code.includes(keyword)
+            );
+        });
+
+        if (subjectIndex !== -1) {
+            return {
+                documentId,
+                semesterIndex,
+                subjectIndex
+            };
+        }
+    }
+
+    return null;
+}
+// ==========================================
+// SAVE MARKSHEET CORRECTIONS
+// ==========================================
+
+if (saveChangesButton) {
+
+    saveChangesButton.addEventListener("click", async () => {
+
+        const changes = detectMarksheetChanges();
+        const correctionsByDocument = {};
+
+        try {
+
+            saveChangesButton.disabled = true;
+            setStatus("Saving marksheet corrections...");
+
+            for (const [fieldId, change] of Object.entries(changes)) {
+
+                const location = getSubjectCorrectionLocation(fieldId);
+
+                // Ignore fields that are not subject marks.
+                if (!location) continue;
+
+                if (!location.documentId) {
+                    throw new Error("Could not identify the marksheet document.");
+                }
+
+                if (change.updated === "") {
+                    throw new Error("Subject marks cannot be empty.");
+                }
+
+                const marks = Number(change.updated);
+
+                if (!Number.isFinite(marks) || marks < 0) {
+                    throw new Error(`Invalid marks entered for ${fieldId}.`);
+                }
+
+                if (!correctionsByDocument[location.documentId]) {
+                    correctionsByDocument[location.documentId] = [];
+                }
+
+                correctionsByDocument[location.documentId].push({
+                    semester_index: location.semesterIndex,
+                    subject_index: location.subjectIndex,
+                    marks_obtained: marks
+                });
+            }
+
+            const documentIds = Object.keys(correctionsByDocument);
+
+            if (documentIds.length === 0) {
+                throw new Error("No subject mark corrections were found.");
+            }
+
+            for (const documentId of documentIds) {
+
+                await apiRequest(
+                    `${API_BASE_URL}/documents/extracted/${encodeURIComponent(documentId)}/update-marksheet`,
+                    {
+                        method: "PUT",
+                        headers: {
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({
+                            subject_corrections:
+                                correctionsByDocument[documentId]
+                        })
+                    }
+                );
+            }
+
+            // Update original values after successful saving.
+            for (const documentId of documentIds) {
+                for (const [fieldId, change] of Object.entries(changes)) {
+                    const location = getSubjectCorrectionLocation(fieldId);
+
+                    if (location?.documentId === documentId) {
+                        originalMarksheetValues[fieldId] = change.updated;
+                    }
+                }
+            }
+
+            updateSaveButtonVisibility();
+
+            setStatus("Marksheet corrections saved successfully!");
+
+        } catch (error) {
+
+            console.error("Marksheet correction failed:", error);
+            setStatus("Could not save corrections: " + error.message);
+
+        } finally {
+
+            saveChangesButton.disabled = false;
+        }
+    });
+}
 // ==========================================
 // RETRIEVE FULL AADHAAR FROM BACKEND
 // ==========================================
 
 async function getFullAadhaar(profileId) {
 
-    const response = await fetch(
+    const data = await apiRequest(
         `${API_BASE_URL}/documents/profiles/${encodeURIComponent(profileId)}/aadhaar`
     );
-
-    const data = await handleResponse(response);
 
     if (!data.aadhaar_number) {
         throw new Error(
@@ -1149,7 +1334,8 @@ if (fillFormButton) {
 
             const result =
                 fillFieldsPreservingManualEdits(mapping);
-
+            attachMarksheetChangeListeners();
+            updateSaveButtonVisibility();
 
             setStatus(
                 `${result.filledCount} fields filled/refreshed. ` +
